@@ -86,14 +86,15 @@ async function aiFixture(t, { secretBackend = createTestSecretBackend(), key = "
   t.after(async () => { upstream.closeAllConnections(); await new Promise((resolve) => upstream.close(resolve)); });
   const baseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
   const profile = await service.upsert({ name: "测试服务", baseUrl, key, ...profileInput });
-  const downstream = http.createServer((req, res) => service.streamChat(req, res, { profileId: profile.id, question: { id: "q1", stem: "求解" }, prompt: "讲解" }).catch((error) => { res.writeHead(400); res.end(error.message); }));
+  let pendingImages;
+  const downstream = http.createServer((req, res) => service.streamChat(req, res, { profileId: profile.id, question: { id: "q1", stem: "求解" }, prompt: "讲解", images: pendingImages }).catch((error) => { res.writeHead(Number(error?.status) || 500); res.end(error.message); }));
   await listenHttp(downstream);
   t.after(async () => { downstream.closeAllConnections(); await new Promise((resolve) => downstream.close(resolve)); });
   return {
     root, store, service, profile, calls, auths, baseUrl, basePath: new URL(baseUrl).pathname,
     absolute: (suffix) => `${baseUrl}${suffix}`,
     setMode: (value) => { mode = value; },
-    chat: () => fetch(`http://127.0.0.1:${downstream.address().port}/chat`),
+    chat: (images) => { pendingImages = images; return fetch(`http://127.0.0.1:${downstream.address().port}/chat`); },
   };
 }
 
@@ -904,4 +905,112 @@ test('Windows DPAPI 默认后端：密文跨服务进程可读并用于请求', 
   assert.equal(status[0].keyStatus, "ok");
   await restarted.models(profile.id);
   assert.deepEqual(auths, ["Bearer sk-fake-dpapi-persist-1"]);
+});
+
+// --- 题目 AI 聊天上传图片（冻结契约最小修复） ---
+const IMG = (mime, text = "img") => `data:image/${mime};base64,${Buffer.from(text).toString("base64")}`;
+const TINY_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/5nR5WQAAAABJRU5ErkJggg==";
+
+test('题目图片：超过旧 2M 字符阈值但原字节不超 2MiB 的大图完整进上游', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  // 恰好 2 MiB 原始字节，其 base64 dataURL 约 2.8M 字符，超过旧 safeText(url, 2_000_000) 阈值。
+  const url = `data:image/png;base64,${Buffer.alloc(2 * 1024 * 1024, 0x41).toString('base64')}`;
+  assert.ok(url.length > 2_000_000, 'dataURL 应超过旧 2M 字符阈值');
+  const parsed = events(await (await f.chat([url])).text());
+  assert.equal(parsed.at(-1).type, 'done');
+  const content = f.calls.at(-1).messages.at(-1).content;
+  assert.ok(Array.isArray(content), '有图时最后一条 user content 应为多模态数组');
+  assert.equal(content[0].type, 'text');
+  assert.equal(content[1].type, 'image_url');
+  assert.equal(content[1].image_url.url, url, '大图必须原样传入，不得被 safeText 截断');
+});
+
+test('题目图片：PNG/JPEG/WebP/GIF 合法 base64 最多 4 张全部原样按序传入', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  const images = ['png', 'jpeg', 'webp', 'gif'].map((mime) => IMG(mime));
+  const parsed = events(await (await f.chat(images)).text());
+  assert.equal(parsed.at(-1).type, 'done');
+  const content = f.calls.at(-1).messages.at(-1).content;
+  assert.equal(content[0].type, 'text');
+  assert.deepEqual(content.slice(1).map((part) => part.image_url.url), images, '全部原样传入且顺序保持');
+});
+
+test('题目图片：超过 4 张显式失败且不产生上游调用', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  const before = f.calls.length;
+  const response = await f.chat([TINY_PNG, TINY_PNG, TINY_PNG, TINY_PNG, TINY_PNG]);
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /最多|4/);
+  assert.equal(f.calls.length, before, '超过 4 张不得产生上游调用');
+});
+
+test('题目图片：解码后超过 2MiB 显式失败且不产生上游调用', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  const url = `data:image/png;base64,${Buffer.alloc(2 * 1024 * 1024 + 1, 0x41).toString('base64')}`;
+  const before = f.calls.length;
+  const response = await f.chat([url]);
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /2 MiB|超过/);
+  assert.equal(f.calls.length, before, '超过 2MiB 不得产生上游调用');
+});
+
+test('题目图片：非法或不支持的格式显式失败且不产生上游调用', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  const bad = [
+    'data:image/png;base64,',              // 空 base64
+    'data:image/png;base64,@@@@',          // 非法 base64 字符
+    'data:image/png;base64,QUJDQUJ',       // 长度非 4 倍数
+    'data:image/svg+xml;base64,PHN2Zz4=',  // 不支持的格式
+    'data:image/png,notbase64',            // 非 base64 编码
+    'https://example.com/a.png',           // 非 dataURL
+    12345,                                  // 非字符串
+  ];
+  for (const item of bad) {
+    const before = f.calls.length;
+    const response = await f.chat([item]);
+    assert.equal(response.status, 400, `应拒绝：${String(item).slice(0, 30)}`);
+    assert.equal(f.calls.length, before, '非法图片不得产生上游调用');
+  }
+});
+
+test('题目图片：未通过视觉测试显式拒绝且不产生上游调用，不静默丢图', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model' }); // 默认 vision: unknown
+  const before = f.calls.length;
+  const response = await f.chat([TINY_PNG]);
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /视觉/);
+  assert.equal(f.calls.length, before, '未过视觉测试不得产生上游调用，也不得静默丢图后继续');
+});
+
+test('题目图片：省略或空数组保持纯文本兼容，且不残留上一次的图片', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  // 先传一张图：上游收到多模态 content。
+  events(await (await f.chat([TINY_PNG])).text());
+  assert.ok(Array.isArray(f.calls.at(-1).messages.at(-1).content), '有图时应为多模态 content');
+  // 之后省略或空数组：必须回到纯文本，不残留上一张图。
+  for (const images of [undefined, []]) {
+    const parsed = events(await (await f.chat(images)).text());
+    assert.equal(parsed.at(-1).type, 'done');
+    assert.equal(typeof f.calls.at(-1).messages.at(-1).content, 'string', '无图时最后一条 user content 应为纯文本字符串');
+  }
+});
+
+test('题目图片：合法图片进入上游但不写入历史', async (t) => {
+  const f = await aiFixture(t);
+  await f.service.upsert({ id: f.profile.id, model: 'math-model', capabilities: { vision: 'passed' } });
+  const parsed = events(await (await f.chat([TINY_PNG])).text());
+  assert.equal(parsed.at(-1).type, 'done');
+  assert.ok(Array.isArray(f.calls.at(-1).messages.at(-1).content), '上游应收到多模态 content');
+  const history = await f.service.conversation(f.profile.id, 'q1');
+  const user = history.messages.at(-2);
+  assert.equal(user.role, 'user');
+  assert.equal(typeof user.content, 'string', '历史中的用户消息应为纯文本');
+  assert.doesNotMatch(JSON.stringify(history), /data:image\/png;base64|image_url/);
 });

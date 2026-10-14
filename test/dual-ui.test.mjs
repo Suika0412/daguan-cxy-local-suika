@@ -4,11 +4,11 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../web/ui-version.js", import.meta.url), "utf8");
-function fixture(initial = {}, pathname = "/index.html") {
+function fixture(initial = {}, pathname = "/index.html", search = "?entry=resume") {
   const data = new Map(Object.entries(initial));
   const storage = { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, value) };
   const redirects = [];
-  const window = { localStorage: storage, document: { documentElement: { dataset: {} } }, location: { pathname, href: `http://localhost${pathname}?entry=resume`, replace: url => redirects.push(url) } };
+  const window = { localStorage: storage, document: { documentElement: { dataset: {} } }, location: { pathname, href: `http://localhost${pathname}${search}`, replace: url => redirects.push(url) } };
   vm.runInNewContext(source, { window, URL });
   return { api: window.DaguanVersions, data, storage, redirects };
 }
@@ -23,6 +23,15 @@ test("explicit old entry is allowed and remembered", () => {
   const f = fixture({ daguan_ui_version_v1: "new" }, "/legacy.html");
   assert.equal(f.redirects.length, 0);
   assert.equal(f.api.selected(f.storage), "old");
+});
+test("explicit ?ui=new overrides a saved old preference and stays on the new entry", () => {
+  const f = fixture({ daguan_ui_version_v1: "old" }, "/index.html", "?ui=new");
+  assert.equal(f.redirects.length, 0);
+  assert.equal(f.storage.getItem(f.api.selectionKey), "new");
+});
+test("no ui param keeps redirecting a saved old preference to the legacy entry", () => {
+  const f = fixture({ daguan_ui_version_v1: "old" }, "/index.html", "?entry=resume");
+  assert.equal(f.redirects[0], "http://localhost/legacy.html?entry=resume");
 });
 test("appearance migration preserves existing data and is idempotent", () => {
   const prefs = JSON.stringify({ theme: "custom", backgroundColor: "#123456" });

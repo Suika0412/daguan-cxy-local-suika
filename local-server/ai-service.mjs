@@ -12,6 +12,13 @@ const MAX_HISTORY_MESSAGES = 400;
 const REQUEST_TIMEOUT_MS = 90_000;
 // Keys shorter than this reveal no characters at all in keyHint.
 const MIN_HINT_LENGTH = 16;
+// Frozen vision-upload contract: at most 4 images, each a base64 dataURL for an
+// allowed raster format whose decoded bytes stay within 2 MiB. The old
+// safeText(url, 2_000_000) truncated a ~2.8M-char dataURL and silently corrupted
+// large images, so images are forwarded verbatim after explicit validation.
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const IMAGE_DATA_URL = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/;
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -23,6 +30,36 @@ function safeText(value, max = 120_000) {
 
 function profileKey(value) {
   return String(value || "").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "default";
+}
+
+// Image-contract violations are client errors (HTTP 400): server errorJson maps
+// `error.status` to the response code. Local helper only — not a global policy.
+function imageContractError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+// Validate `payload.images` against the frozen vision contract and return the
+// dataURLs to forward upstream verbatim (no slice, no safeText truncation).
+// Omitted or empty stays text-only; any non-empty value is validated explicitly
+// and never silently dropped or trimmed.
+function normalizeImages(value, capabilities) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw imageContractError("图片参数必须是字符串数组");
+  if (value.length === 0) return [];
+  if (capabilities?.vision !== "passed") throw imageContractError("当前 AI 服务未通过视觉测试，不能上传图片。请先在服务档案中完成视觉测试");
+  if (value.length > MAX_IMAGES) throw imageContractError(`一次最多上传 ${MAX_IMAGES} 张图片`);
+  return value.map((url) => {
+    const match = typeof url === "string" ? IMAGE_DATA_URL.exec(url) : null;
+    if (!match) throw imageContractError("图片只支持 PNG/JPEG/WebP/GIF 格式的 base64 dataURL");
+    const base64 = match[1];
+    if (base64.length % 4 !== 0) throw imageContractError("图片 base64 数据不合法");
+    const bytes = Buffer.from(base64, "base64");
+    if (bytes.length === 0) throw imageContractError("图片内容为空");
+    if (bytes.length > MAX_IMAGE_BYTES) throw imageContractError("图片解码后超过 2 MiB 上限");
+    return url;
+  });
 }
 
 function isPrivateAddress(address) {
@@ -785,8 +822,9 @@ export function createAiService({ store, secretBackend } = {}) {
       ...historyMessages.map((item) => ({ role: item.role, content: item.content })),
       { role: "user", content: userMessage },
     ];
-    if (profile.capabilities?.vision === "passed" && Array.isArray(payload.images) && payload.images.length) {
-      messages[messages.length - 1].content = [{ type: "text", text: userMessage }, ...payload.images.slice(0, 4).map((url) => ({ type: "image_url", image_url: { url: safeText(url, 2_000_000) } }))];
+    const images = normalizeImages(payload.images, profile.capabilities);
+    if (images.length) {
+      messages[messages.length - 1].content = [{ type: "text", text: userMessage }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))];
     }
     const runId = randomUUID();
     const controller = new AbortController();

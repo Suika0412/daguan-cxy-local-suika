@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
+import vm from "node:vm";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import http from "node:http";
@@ -177,6 +178,62 @@ test("Windows 启动器不再调用 npm，直接用 Node 运行本地中控台",
   const launcher = read("scripts/start-windows.ps1");
   assert.match(launcher, /Invoke-WebRequest -Uri \$NodeUrl -OutFile \$NodeZip -UseBasicParsing/);
   assert.match(launcher, /Get-FileHash -Algorithm SHA256 -LiteralPath \$NodeZip/);
+});
+
+test("三种自动打开入口都显式进入新版 /index.html?ui=new", () => {
+  const launcher = read("scripts/start-windows.ps1");
+  const server = read("local-server/server.mjs");
+  // 1) Windows 启动器复用分支：Start-Process 直接带 ?ui=new
+  assert.match(launcher, /Start-Process "http:\/\/\$\(\$owner\.host\):\$\(\$owner\.port\)\/index\.html\?ui=new"/);
+  // 2) 新服务分支：openBrowser 模板以 ?ui=new 开头，browserPackage 用 & 追加
+  assert.match(server, /index\.html\?ui=new\$\{process\.env\.DAGUAN_BROWSER_PACKAGE/);
+  // 3) 复用竞争分支：openBrowser 对 serviceOwnerUrl 结果追加 ?ui=new
+  assert.match(server, /openBrowser\(`\$\{url\}\?ui=new`\)/);
+});
+
+// runtime：抽取并执行产品 openBrowser，用 mock spawn 采集真实 args/options，
+// 证明 URL 作为整体被双引号包裹、& 位于引号内，并以 windowsVerbatimArguments 透传。
+test("openBrowser 以双引号包裹 URL 并以 windowsVerbatimArguments 调用 spawn", () => {
+  const src = read("local-server/server.mjs");
+  const start = src.indexOf("function openBrowser(url)");
+  const end = src.indexOf("function localStateShape");
+  assert.ok(start >= 0 && end > start, "应能定位 openBrowser 源码");
+  const calls = [];
+  const context = vm.createContext({
+    process: { platform: "win32", env: { DAGUAN_OPEN_BROWSER: "1", ComSpec: "cmd.exe" } },
+    spawn: (command, args, options) => { calls.push({ command, args, options }); return { unref() {} }; },
+  });
+  vm.runInContext(src.slice(start, end) + "\nthis.openBrowser = openBrowser;", context);
+  const url = "http://127.0.0.1:8247/index.html?ui=new&browserPackage=1";
+  context.openBrowser(url);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "cmd.exe");
+  assert.equal(calls[0].options.windowsVerbatimArguments, true);
+  // 逐项比较字符串（跨 vm realm 的数组原型不同，deepStrictEqual 会误判）。
+  assert.equal(calls[0].args.length, 4);
+  assert.equal(calls[0].args[0], "/c");
+  assert.equal(calls[0].args[1], "start");
+  assert.equal(calls[0].args[2], '""');
+  const target = calls[0].args[3];
+  assert.equal(target, `"${url}"`);
+  assert.ok(target.startsWith('"') && target.endsWith('"'), "URL 应被双引号包裹");
+  assert.ok(target.includes("ui=new&browserPackage=1"), "& 参数应完整保留在同一 token 内");
+});
+
+// runtime：仅 Windows 上用隔离的 cmd echo 验证“引号内的 & 不会被当命令分隔符”，
+// 以 echo 取代 start，避免打开真实系统浏览器/profile。
+test("Windows cmd 以双引号包裹时保留 URL 中的 &", async (t) => {
+  if (process.platform !== "win32") return t.skip("仅 Windows 验证 cmd 解析");
+  const url = "http://127.0.0.1:8247/index.html?ui=new&browserPackage=1";
+  const command = process.env.ComSpec || "cmd.exe";
+  const out = await new Promise((resolve, reject) => {
+    const child = spawn(command, ["/c", "echo", `"${url}"`], { windowsVerbatimArguments: true, windowsHide: true });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.once("error", reject);
+    child.once("close", () => resolve(stdout));
+  });
+  assert.ok(out.includes("ui=new&browserPackage=1"), `cmd 应保留引号内的 &，实际输出：${JSON.stringify(out)}`);
 });
 
 test("隔离副本不含 node_modules 即可启动服务并返回真实静态资源", async () => {

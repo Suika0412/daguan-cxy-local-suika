@@ -107,15 +107,17 @@ test("Service Worker 不预缓存首屏之外的大型索引和字体", () => {
   const sw = fs.readFileSync(new URL("../web/service-worker.js", import.meta.url), "utf8");
   const version = sw.match(/daguan-shell-v(\d+)/)?.[1];
   assert.ok(version, 'Service Worker 使用版本化的缓存名');
-  assert.ok(app.includes(`service-worker.js?v=${version}`));
   assert.ok(newApp.includes(`service-worker.js?v=${version}`));
+  assert.ok(app.includes("service-worker.js?v=165"));
   assert.match(sw, /"\.\/legacy\.html"/);
   const legacyStyle = html.match(/href="(\.\/legacy\.css\?v=\d+)"/)?.[1];
   assert.ok(legacyStyle); assert.ok(sw.includes(JSON.stringify(legacyStyle)));
   const legacyScript = html.match(/src="(\.\/app-legacy\.js\?v=\d+)"/)?.[1];
   assert.ok(legacyScript); assert.ok(sw.includes(JSON.stringify(legacyScript)));
   assert.match(sw, /"\.\/guides\.css\?v=2"/);
-  assert.match(sw, /"\.\/styles-new\.css\?v=126"/);
+  assert.match(sw, /"\.\/styles-new\.css\?v=127"/);
+  assert.match(sw, /"\.\/ui-version\.js\?v=106"/);
+  assert.match(sw, /"\.\/ui-version\.js\?v=107"/);
   assert.match(sw, /"\.\/source-taxonomy\.js\?v=1"/);
   const newScript = newHtml.match(/src="(\.\/app-new\.js\?v=\d+)"/)?.[1];
   assert.ok(newScript); assert.ok(sw.includes(JSON.stringify(newScript)));
@@ -137,8 +139,8 @@ test("新版与旧版都监听本地服务状态事件并刷新共享学习记�
 });
 
 test("新版入口承载新版前端并与旧版共享版本选择", () => {
-  assert.match(newHtml, /styles-new\.css\?v=126/);
-  assert.match(newHtml, /ui-version\.js\?v=106/);
+  assert.match(newHtml, /styles-new\.css\?v=127/);
+  assert.match(newHtml, /ui-version\.js\?v=107/);
   assert.match(newHtml, /ui-bootstrap\.js\?v=1/);
   assert.match(newHtml, /source-taxonomy\.js\?v=1/);
   assert.match(newHtml, /app-new\.js\?v=\d+/);

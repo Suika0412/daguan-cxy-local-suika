@@ -198,8 +198,14 @@
   api.appearanceKey = appearanceKeys[current];
   try {
     migrate(root.localStorage);
-    if (current === "old") root.localStorage.setItem(selectionKey, "old");
-    else if (selected(root.localStorage) === "old") root.location.replace(targetUrl(root.location.href, "old"));
+    if (current === "old") {
+      root.localStorage.setItem(selectionKey, "old");
+    } else if (new URL(root.location.href).searchParams.get("ui") === "new") {
+      // 显式 ?ui=new 优先于持久旧版偏好：写回 new 且不跳转，保证启动器进入新版。
+      root.localStorage.setItem(selectionKey, "new");
+    } else if (selected(root.localStorage) === "old") {
+      root.location.replace(targetUrl(root.location.href, "old"));
+    }
   } catch { /* Restricted storage must not prevent reading the question bank. */ }
   root.document.documentElement.dataset.uiVersion = current;
 })(typeof window === "undefined" ? globalThis : window);

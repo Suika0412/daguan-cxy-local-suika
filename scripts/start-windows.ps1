@@ -54,7 +54,7 @@ if (Test-Path -LiteralPath $InstanceFile) {
     $health = Invoke-RestMethod "http://$($owner.host):$($owner.port)/api/health" -TimeoutSec 2
     if ($health.service -eq "daguan-local-console" -and $health.apiProtocol -eq $ServiceApiProtocol -and $owner.apiProtocol -eq $ServiceApiProtocol -and $health.instanceId -eq $owner.instanceId) {
       Write-Host "The shared local console is already running on port $($owner.port)."
-      Start-Process "http://$($owner.host):$($owner.port)/index.html"
+      Start-Process "http://$($owner.host):$($owner.port)/index.html?ui=new"
       exit 0
     }
   } catch {}

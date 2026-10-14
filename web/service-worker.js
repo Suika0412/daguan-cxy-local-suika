@@ -1,4 +1,4 @@
-const CACHE = "daguan-shell-v165";
+const CACHE = "daguan-shell-v166";
 const SHELL = [
   "./",
   "./landing.html",
@@ -13,15 +13,16 @@ const SHELL = [
   "./assets/landing/daguan-curve-logo.png",
   "./index.html",
   "./ui-version.js?v=106",
+  "./ui-version.js?v=107",
   "./legacy.html",
   "./legacy.css?v=96",
   "./guides.css?v=2",
   "./app-legacy.js?v=121",
   "./styles.css?v=89",
   "./app2.js?v=95",
-  "./styles-new.css?v=126",
+  "./styles-new.css?v=127",
   "./source-taxonomy.js?v=1",
-  "./app-new.js?v=153",
+  "./app-new.js?v=154",
   "./study-report.css?v=1",
   "./study-report.js?v=1",
   "./study-activity-client.js?v=2",
@@ -41,7 +42,7 @@ const SHELL = [
   "./safe-render.js?v=5",
   "./new-data.js?v=2",
   "./new-state.js?v=2",
-  "./new-ai.js?v=1",
+  "./new-ai.js?v=2",
   "./vendor/marked.min.js",
   "./vendor/katex.min.js",
   "./vendor/katex.min.css",

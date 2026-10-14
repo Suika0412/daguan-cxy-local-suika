@@ -248,7 +248,8 @@ function broadcastHistory() {
 function openBrowser(url) {
   if (process.platform !== "win32" || process.env.DAGUAN_OPEN_BROWSER !== "1") return;
   const command = process.env.ComSpec || "cmd.exe";
-  spawn(command, ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  // URL 整体双引号包裹并以 windowsVerbatimArguments 透传，避免 cmd 把 & 当命令分隔符丢掉 browserPackage 等参数。
+  spawn(command, ["/c", "start", '""', `"${url}"`], { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true }).unref();
 }
 
 function localStateShape(value) {
@@ -760,7 +761,7 @@ if (!lease?.acquired) {
   if (lease?.owner && await waitForServiceOwner(lease.owner)) {
     const url = serviceOwnerUrl(lease.owner);
     console.log(`SERVICE_INSTANCE_REUSED ${url}`);
-    openBrowser(url);
+    openBrowser(`${url}?ui=new`);
     process.exitCode = 0;
   } else {
     const error = new Error(lease?.recovering
@@ -812,7 +813,7 @@ if (!lease?.acquired) {
   }
   console.log(`SERVICE_INSTANCE_READY http://${HOST}:${PORT}/ ${serviceInstance.instanceId}`);
   questionBank.start();
-  openBrowser(`http://${HOST}:${PORT}/index.html${process.env.DAGUAN_BROWSER_PACKAGE === "1" ? "?browserPackage=1" : ""}`);
+  openBrowser(`http://${HOST}:${PORT}/index.html?ui=new${process.env.DAGUAN_BROWSER_PACKAGE === "1" ? "&browserPackage=1" : ""}`);
 
   let shuttingDown = false;
   const shutdown = async () => {
