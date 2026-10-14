@@ -1,40 +1,43 @@
 {
   "version": 1,
-  "total": 7119,
+  "total": 6572,
   "types": {
-    "subjective": 5147,
-    "single_choice": 1966,
-    "multiple_choice": 6
+    "subjective": 4748,
+    "single_choice": 1817,
+    "multiple_choice": 7
   },
   "shards": {
-    "高等数学": {
-      "file": "shards/高等数学.json",
-      "count": 3453
-    },
-    "线性代数": {
-      "file": "shards/线性代数.json",
-      "count": 803
-    },
-    "概率统计": {
-      "file": "shards/概率统计.json",
-      "count": 546
+    "未分类": {
+      "file": "shards/未分类.json",
+      "count": 273
     },
     "历年真题": {
       "file": "shards/历年真题.json",
-      "count": 1774
+      "count": 930
+    },
+    "概率统计": {
+      "file": "shards/概率统计.json",
+      "count": 706
     },
     "模拟哥专区": {
       "file": "shards/模拟哥专区.json",
-      "count": 543
+      "count": 43
     },
-    "未分类": {
-      "file": "shards/未分类.json",
-      "count": 0
+    "线性代数": {
+      "file": "shards/线性代数.json",
+      "count": 958
+    },
+    "高等数学": {
+      "file": "shards/高等数学.json",
+      "count": 3654
+    },
+    "高等数学-核心": {
+      "file": "shards/高等数学-核心.json",
+      "count": 8
     }
   },
-  "asset_count": 1243,
+  "asset_base_remote": "https://cxyonly.fans/api/v1/question-assets/",
+  "asset_count": 1288,
   "asset_base": "./data/assets/",
-  "synced_at": "2026-10-03T15:04:42.095Z",
-  "source": "https://www.cxyonly.fans/math",
-  "source_total": 6730
+  "synced_at": "2026-10-11T12:03:44.769Z"
 }

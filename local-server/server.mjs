@@ -16,7 +16,7 @@ import { createStudyActivity } from "./study-activity.mjs";
 
 const ROOT = path.resolve(process.env.DAGUAN_ROOT_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."));
 const WEB_ROOT = path.resolve(process.env.DAGUAN_WEB_ROOT || path.join(ROOT, "web"));
-const PORT = Number(process.env.PORT || 8080);
+const PORT = Number(process.env.PORT || 8247);
 const HOST = "127.0.0.1";
 const DEFAULT_PAGE = process.env.DAGUAN_DEFAULT_PAGE === "/index.html" ? "/index.html" : "/landing.html";
 const BUILD_VERSION = "2026.09.27-shared-service-r1";
@@ -96,6 +96,102 @@ function requirePreviewAccess(req, res) {
   if (!PREVIEW_MODE || hasPreviewAccess(req)) return true;
   json(res, 403, { ok: false, code: "PREVIEW_LOCKED", error: "预览模式下的个人功能需要输入预览密钥" });
   return false;
+}
+
+// 远程网关（desktop/remote-gateway.cjs）在转发请求时打上该标记；本机页面、Electron/Node
+// 代理和浏览器版都不会携带它。标记只用于收紧，客户端伪造它不会获得任何额外权限。
+const REMOTE_SESSION_HEADER = "x-daguan-remote";
+const LOOPBACK_HOST_NAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+function isRemoteSession(req) {
+  return String(req.headers[REMOTE_SESSION_HEADER] || "") === "1";
+}
+
+function splitHost(value) {
+  const host = String(value || "").toLowerCase();
+  if (!host) return { name: null, port: null };
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    if (end < 0) return { name: null, port: null };
+    return { name: host.slice(0, end + 1), port: host[end + 1] === ":" ? Number(host.slice(end + 2)) : null };
+  }
+  const index = host.indexOf(":");
+  return { name: index > 0 ? host.slice(0, index) : host, port: index > 0 ? Number(host.slice(index + 1)) : null };
+}
+
+// 本地 AI 边界：请求必须经本机回环地址进入，挡住 DNS 重绑定等把外部域名指向 127.0.0.1 的攻击。
+function loopbackHostOk(req) {
+  const { name, port } = splitHost(req.headers.host);
+  return LOOPBACK_HOST_NAMES.has(name) && (port == null || port === PORT);
+}
+
+// 同源 Origin 检查挡住跨站网页；不带 Origin 的本机 Node/Electron 代理保持兼容，
+// 但同操作系统内的恶意进程仍可伪造请求，这一边界不声称已认证阻断。
+// Origin 必须是“纯源”：不带用户凭据、路径、查询或片段；端口缺省时按 http 默认
+// 端口 80 计算，因此用户把服务覆盖为 80 时无显式端口的同源 Origin 仍然合法，
+// 而默认 8247 下无端口 Origin 会被正确拒绝。
+function sameOriginOk(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    const url = new URL(origin);
+    const name = url.hostname.toLowerCase();
+    if (url.protocol !== "http:" || !LOOPBACK_HOST_NAMES.has(name)) return false;
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return false;
+    return Number(url.port || 80) === PORT;
+  } catch { return false; }
+}
+
+function jsonWriteOk(req) {
+  return String(req.headers["content-type"] || "").toLowerCase().split(";")[0].trim() === "application/json";
+}
+
+// /api/ai/* 统一边界：回环 Host + 同源 Origin + application/json 写入。
+// 返回 true 表示已拒绝并已写出响应，调用方必须立即 return，
+// 否则拒绝之后路由仍会继续执行，造成“客户端看到 403、副作用却已发生”。
+function aiLocalBoundary(req, res) {
+  if (!loopbackHostOk(req)) { json(res, 403, { ok: false, code: "HOST_REJECTED", error: "AI 接口只允许通过本机地址访问" }); return true; }
+  if (!sameOriginOk(req)) { json(res, 403, { ok: false, code: "ORIGIN_REJECTED", error: "AI 接口只允许来自本机页面的同源请求" }); return true; }
+  const method = String(req.method || "GET").toUpperCase();
+  if (["POST", "PATCH", "PUT"].includes(method) && !jsonWriteOk(req)) {
+    json(res, 415, { ok: false, code: "JSON_REQUIRED", error: "AI 写入请求必须使用 application/json" });
+    return true;
+  }
+  return false;
+}
+
+// 远程会话只读 AI 服务配置；掩码列表（GET/HEAD）保留，供远程界面选择服务继续问答。
+function aiConfigWrite(pathname, method) {
+  const value = String(method || "GET").toUpperCase();
+  if (pathname === "/api/ai/profiles") return value !== "GET" && value !== "HEAD";
+  return pathname.startsWith("/api/ai/profiles/");
+}
+
+// 存储事实（后端 id、是否加密/持久/可用）在进程生命周期内不会变化，成功读取后永久缓存；
+// 读取失败只按短 TTL 缓存，避免把一次瞬时失败固化成“永远未加密”的误报，也不反复读盘。
+const AI_STORAGE_FACTS_RETRY_MS = 5000;
+let aiStorageFacts = null;
+async function aiStorageFactsCached() {
+  if (aiStorageFacts && !(aiStorageFacts.failed && Date.now() - aiStorageFacts.at >= AI_STORAGE_FACTS_RETRY_MS)) return aiStorageFacts;
+  const facts = { at: Date.now(), failed: false, backend: "none", available: false, encrypted: false, persistent: true, canPersistSecrets: false };
+  try {
+    if (typeof ai.storageStatus === "function") {
+      const status = await ai.storageStatus();
+      facts.backend = String(status?.backend?.id || status?.keyStorage || "none");
+      facts.available = status?.available === true;
+      facts.encrypted = status?.encrypted === true;
+      facts.persistent = status?.persistent === true;
+      facts.canPersistSecrets = status?.canPersistSecrets === true;
+    }
+  } catch { facts.failed = true; /* 读取失败不影响学习功能，按未加密处理并按短 TTL 重试 */ }
+  aiStorageFacts = facts;
+  return facts;
+}
+
+async function aiConfigStatus(req) {
+  const writable = !isRemoteSession(req);
+  const facts = await aiStorageFactsCached();
+  return { writable, readOnlyReason: writable ? null : "remote", backend: facts.backend, available: facts.available, encrypted: facts.encrypted, persistent: facts.persistent, canPersistSecrets: facts.canPersistSecrets };
 }
 
 async function body(req) {
@@ -400,7 +496,7 @@ async function route(req, res) {
   if (pathname === "/api/runtime" && method === "GET") {
     const state = await store.readState();
     const profiles = !PREVIEW_MODE || hasPreviewAccess(req) ? await ai.profiles() : [];
-    return json(res, 200, { ok: true, appVersion: BUILD_VERSION, stateRevision: PREVIEW_MODE && !hasPreviewAccess(req) ? 0 : state.revision, catalog: await catalogInfo(), ai: { configured: profiles.length > 0, profiles: profiles.length }, python: { optional: true, configured: process.env.DAGUAN_PYTHON !== "disabled" }, time: nowIso() });
+    return json(res, 200, { ok: true, appVersion: BUILD_VERSION, stateRevision: PREVIEW_MODE && !hasPreviewAccess(req) ? 0 : state.revision, catalog: await catalogInfo(), ai: { configured: profiles.length > 0, profiles: profiles.length }, aiConfig: await aiConfigStatus(req), python: { optional: true, configured: process.env.DAGUAN_PYTHON !== "disabled" }, time: nowIso() });
   }
   if (pathname === "/api/catalog/refresh" && method === "POST") return json(res, 202, startCatalogRefresh());
   if (pathname.startsWith("/api/catalog/refresh/") && method === "GET") {
@@ -533,7 +629,13 @@ async function route(req, res) {
     });
     return json(res, 200, { ok: true, state: saved });
   }
-  if (pathname === "/api/ai/profiles" && method === "GET") return json(res, 200, { ok: true, profiles: await ai.profiles() });
+  if (pathname.startsWith("/api/ai/")) {
+    if (aiLocalBoundary(req, res)) return;
+    if (aiConfigWrite(pathname, method) && isRemoteSession(req)) {
+      return json(res, 403, { ok: false, code: "AI_CONFIG_READONLY", error: "远程会话为只读：AI 服务配置请在本机修改" });
+    }
+  }
+  if (pathname === "/api/ai/profiles" && method === "GET") return json(res, 200, { ok: true, profiles: await ai.profiles(), keyStorage: (await aiStorageFactsCached()).backend });
   if (pathname === "/api/ai/profiles" && method === "POST") return json(res, 200, { ok: true, profile: await ai.upsert(await body(req)) });
   if (pathname.startsWith("/api/ai/profiles/") && pathname.endsWith("/models") && method === "GET") {
     const id = pathname.slice("/api/ai/profiles/".length, -"/models".length);
@@ -672,6 +774,20 @@ if (!lease?.acquired) {
   try {
     await store.readState();
     await studyActivity.ensure();
+    if (typeof ai.migrate === "function") {
+      // AI Key 存储迁移：只记录数量与存储后端，绝不输出 Key 内容；失败不阻塞启动。
+      try {
+        const migrated = await ai.migrate();
+        console.log(`AI_SECRETS_MIGRATED ${JSON.stringify({
+          migrated: Number(migrated?.migrated) || 0,
+          keyStorage: migrated?.keyStorage || null,
+          warnings: Array.isArray(migrated?.warnings) ? migrated.warnings.length : 0,
+          lastError: migrated?.lastError || null,
+        })}`);
+      } catch (error) {
+        console.log(`AI_SECRETS_MIGRATE_FAILED ${String(error?.message || error).slice(0, 200)}`);
+      }
+    }
     questionBank = await createQuestionBankUpdater({
       dataDir: store.dataDir, bundledDataDir: path.join(WEB_ROOT, "data"),
       enabled: process.env.DAGUAN_AUTO_UPDATE_BANK === "1",

@@ -2,7 +2,7 @@
   "use strict";
 
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    navigator.serviceWorker.register("./service-worker.js?v=164").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=165").catch(() => {});
   }
 
   const DATA = "./data";
@@ -3430,7 +3430,7 @@
         setHomeSyncCard("setup", "尚未完成登录配置", "点击“同步进度”开始首次配置，输入一次大观园登录信息即可。");
       }
     }).catch(() => {
-      setHomeSyncCard("warning", "本地中控台未连接", "请重新双击启动脚本，或检查 8080 端口是否被占用。");
+      setHomeSyncCard("warning", "本地中控台未连接", "请重新双击启动脚本，或检查 8247 端口是否被占用。");
     });
   }
 

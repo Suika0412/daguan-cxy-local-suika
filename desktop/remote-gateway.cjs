@@ -6,6 +6,25 @@ const path = require('node:path');
 const COOKIE = 'daguan_remote_session';
 const SESSION_AGE = 30 * 24 * 60 * 60 * 1000;
 const BLOCKED = new Set(['/api/runtime/stop', '/api/catalog/refresh']);
+// 上游服务支持 /daguan-math 部署前缀，且最多剥离一次后才路由。
+// 网关准入判定必须复现同一规范，否则 /daguan-math/api/catalog/refresh、
+// /daguan-math/service-worker.js、/daguan-math/api/state/events 这类带前缀路径
+// 会绕过既有管理面限制。转发仍保留原始前缀，由上游自行剥离一次，
+// 从而保证“网关判定所见”与“上游路由所见”始终一致（双重前缀在上游同样 404）。
+const UPSTREAM_PREFIX = '/daguan-math';
+function stripUpstreamPrefix(pathname) {
+  if (pathname === UPSTREAM_PREFIX) return '/';
+  if (pathname.startsWith(`${UPSTREAM_PREFIX}/`)) return pathname.slice(UPSTREAM_PREFIX.length);
+  return pathname;
+}
+// 远程会话对 AI 服务配置只读：仅保留 GET/HEAD 掩码列表，创建/修改/删除/取模型/连接测试一律拒绝。
+const REMOTE_MARKER = 'x-daguan-remote';
+function aiConfigBlocked(p, method) {
+  if (!p || !p.startsWith('/api/ai/')) return false;
+  const m = String(method || 'GET').toUpperCase();
+  if (p === '/api/ai/profiles') return m !== 'GET' && m !== 'HEAD';
+  return p.startsWith('/api/ai/profiles/');
+}
 const LOGIN_HTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>大观园 · 远程登录</title><style>body{font:16px system-ui,"Microsoft YaHei",sans-serif;background:#f6f2e9;color:#282522;display:grid;place-items:center;min-height:100vh;margin:0}main{background:white;border:1px solid #e5ddd0;border-radius:18px;padding:32px;width:min(360px,calc(100vw - 48px));box-shadow:0 12px 36px #0001}h1{font-size:24px}input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:9px;font:inherit}input{border:1px solid #bdb5a9}button{background:#c53d30;color:white;border:0;cursor:pointer}p{color:#9c251e;min-height:1.4em}</style><main><h1>大观园远程访问</h1><form id="login"><label for="password">访问密码</label><input id="password" type="password" autocomplete="current-password" required><button>登录</button><p id="message" role="alert"></p></form></main><script>document.getElementById('login').onsubmit=async e=>{e.preventDefault();const p=document.getElementById('password'),m=document.getElementById('message');m.textContent='';try{const r=await fetch('/__remote/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p.value})});p.value='';if(!r.ok){m.textContent=r.status===429?'尝试过于频繁，请稍后重试':'密码错误';return}location.replace('/index.html')}catch{m.textContent='暂时无法连接'}};</script></html>`;
 
 function equal(a, b) {
@@ -17,13 +36,30 @@ function json(res, code, body, headers = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
 }
-function normalizePath(raw) {
+function normalizePath(raw, { lowercase = true } = {}) {
   try {
     const pathname = new URL(raw, 'http://localhost').pathname;
     const decoded = decodeURIComponent(pathname).replace(/\\/g, '/');
     if (decoded.includes('\0') || decoded.split('/').includes('..') || /\/\//.test(decoded)) return null;
-    return decoded.toLowerCase().replace(/\/+$/, '') || '/';
+    const trimmed = decoded.replace(/\/+$/, '') || '/';
+    return lowercase ? trimmed.toLowerCase() : trimmed;
   } catch { return null; }
+}
+// 代理转发与准入判定使用同一套解码/规范化结果，仅保留原始大小写，
+// 使编码、双斜杠、尾斜杠等变体无法在判定与转发之间制造差异。
+// 转发保留 /daguan-math 原始前缀，由上游自行剥离一次，
+// 与 policyPath 的判定视角保持一致。
+function forwardPath(raw) {
+  const p = normalizePath(raw, { lowercase: false });
+  if (!p) return null;
+  try { return encodeURI(p).replace(/\?/g, '%3F').replace(/#/g, '%23') + new URL(raw, 'http://localhost').search; }
+  catch { return null; }
+}
+// 准入判定用：在统一规范化之后复现上游“前缀最多剥离一次”的路由规范，
+// 使带前缀（含编码变体）的管理面路径无法绕过拦截。
+function policyPath(raw) {
+  const p = normalizePath(raw);
+  return p === null ? null : stripUpstreamPrefix(p);
 }
 function blockedPath(p) {
   return !p || p.startsWith('/__remote') && !['/__remote/login', '/__remote/logout', '/__remote/status'].includes(p)
@@ -93,13 +129,19 @@ function createRemoteGateway({ authFile, upstream, port = 0, getMode = () => 'qu
     attempts.delete(ip); globalFailures = 0; globalBlockedUntil = 0;
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie() });
   }
-  function proxy(req, res, bufferAi = false) {
+  function proxy(req, res, bufferAi = false, forwardTarget = req.url) {
     let target;
     try { target = new URL(upstream()); if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(target.hostname)) throw Error('invalid upstream'); }
     catch { return json(res, 503, { error: 'Local service unavailable' }); }
     const headers = { ...req.headers, host: target.host };
     for (const name of ['cookie', 'cf-connecting-ip', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'connection', 'proxy-connection', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade']) delete headers[name];
-    const forward = http.request({ hostname: '127.0.0.1', port: target.port, path: req.url, method: req.method, headers }, response => {
+    // 远程页面的 Origin 指向隧道主机，本地服务无法也不应信任它；去掉 Origin 让本机代理
+    // （Electron/Node）兼容路径继续放行学习请求，同时避免把外部 Origin 透传给本地服务。
+    delete headers.origin;
+    // 标记远程会话，供本地服务对 AI 配置只读加固；先删后写，忽略客户端伪造值。
+    delete headers[REMOTE_MARKER];
+    headers[REMOTE_MARKER] = '1';
+    const forward = http.request({ hostname: '127.0.0.1', port: target.port, path: forwardTarget, method: req.method, headers }, response => {
       const responseHeaders = { ...response.headers, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin' };
       for (const name of ['set-cookie', 'connection', 'proxy-connection', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade']) delete responseHeaders[name];
       if (bufferAi && response.statusCode === 200) {
@@ -126,8 +168,9 @@ function createRemoteGateway({ authFile, upstream, port = 0, getMode = () => 'qu
     res.setHeader('Cache-Control', 'no-store');
     const host = String(req.headers.host || '').toLowerCase();
     if (!publicHost || host !== publicHost) return json(res, 421, { error: 'Unknown hostname' });
-    const p = normalizePath(req.url);
+    const p = policyPath(req.url);
     if (blockedPath(p)) return json(res, 403, { error: 'Forbidden' });
+    if (aiConfigBlocked(p, req.method)) return json(res, 403, { error: '远程会话为只读：AI 服务配置请在本机修改' });
     if (p === '/__remote/login' && req.method === 'POST') return login(req, res);
     if (p === '/__remote/logout' && req.method === 'POST') {
       if (!sameOrigin(req)) return json(res, 403, { error: 'Forbidden' });
@@ -142,7 +185,9 @@ function createRemoteGateway({ authFile, upstream, port = 0, getMode = () => 'qu
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !sameOrigin(req)) return json(res, 403, { error: 'Forbidden' });
     if (p === '/service-worker.js') return json(res, 404, { error: 'Unavailable remotely' });
     if (getMode() === 'quick' && p === '/api/state/events') return json(res, 404, { error: 'Use polling' });
-    proxy(req, res, getMode() === 'quick' && p === '/api/ai/chat');
+    const forwardTarget = forwardPath(req.url);
+    if (!forwardTarget) return json(res, 400, { error: 'Bad request' });
+    proxy(req, res, getMode() === 'quick' && p === '/api/ai/chat', forwardTarget);
   }
   return {
     async init() { auth = await loadAuth(authFile); },
@@ -167,4 +212,4 @@ function createRemoteGateway({ authFile, upstream, port = 0, getMode = () => 'qu
     async stop() { if (!server) return; const current = server; server = null; current.closeAllConnections(); await new Promise(resolve => current.close(resolve)); },
   };
 }
-module.exports = { createRemoteGateway, normalizePath, blockedPath, SESSION_AGE };
+module.exports = { createRemoteGateway, normalizePath, policyPath, stripUpstreamPrefix, blockedPath, aiConfigBlocked, forwardPath, SESSION_AGE };

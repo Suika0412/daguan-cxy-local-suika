@@ -13,5 +13,8 @@
 .ai-services-fields .ai-services-check { flex-direction:row; align-items:center; }
 .ai-services-actions { margin-top:16px; }
 .ai-services [data-status] { min-height:24px; overflow-wrap:anywhere; }
+.ai-services [data-storage] { display:block; color:var(--text-secondary, #6b6257); }
+.ai-services [data-key-status] { color:var(--text-secondary, #6b6257); }
+.ai-services [data-key-status][data-tone="warn"] { color:#9c251e; font-weight:600; }
 .ai-streaming-control { display:flex; align-items:center; gap:6px; padding:6px 20px; font-size:13px; }
 @media(max-width:672px) { .ai-service-item { align-items:flex-start; flex-direction:column; } .ai-services-fields { grid-template-columns:minmax(0,1fr); } }

@@ -124,10 +124,10 @@ function isPortBusy(port) {
 }
 
 async function choosePort() {
-  for (let port = 8080; port <= 8099; port += 1) {
+  for (let port = 8247; port <= 8266; port += 1) {
     if (!(await isPortBusy(port))) return { port, reuse: false };
   }
-  throw new Error("8080-8099 端口均不可用，请关闭占用端口的程序后重试");
+  throw new Error("8247-8266 端口均不可用，请关闭占用端口的程序后重试");
 }
 
 function openBrowser(url) {

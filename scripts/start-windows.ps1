@@ -4,7 +4,6 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $NodeVersion = "20.19.3"
 $RuntimeDir = Join-Path $Root ".runtime\node-v$NodeVersion-win-x64"
 $NodeExe = Join-Path $RuntimeDir "node.exe"
-$NpmCmd = Join-Path $RuntimeDir "npm.cmd"
 $NodeZip = Join-Path $Root ".runtime\node-v$NodeVersion-win-x64.zip"
 $DataDir = Join-Path $env:LOCALAPPDATA "DaguanMath\data"
 $ServiceApiProtocol = 1
@@ -23,7 +22,7 @@ function Find-Node {
 
 function Ensure-Node {
   $systemNode = Find-Node
-  if ($systemNode) { return @{ Node = $systemNode; Npm = (Get-Command npm.cmd).Source } }
+  if ($systemNode) { return @{ Node = $systemNode } }
   if (-not (Test-Path $NodeExe)) {
     New-Item -ItemType Directory -Force -Path (Split-Path $NodeZip) | Out-Null
     Write-Host "Node.js 20 was not found. Downloading the portable runtime..."
@@ -42,14 +41,12 @@ function Ensure-Node {
     Remove-Item -LiteralPath $extractRoot -Recurse -Force
   }
   if (-not (Test-Path $NodeExe)) { throw "Node.js runtime installation failed: $NodeExe" }
-  return @{ Node = $NodeExe; Npm = $NpmCmd }
+  return @{ Node = $NodeExe }
 }
 
 $runtime = Ensure-Node
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-Write-Host "Checking Node dependencies..."
-& $runtime.Npm ci --ignore-scripts --no-audit --no-fund
-if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+Write-Host "The local console uses only Node.js built-in modules; no dependency install is needed."
 
 if (Test-Path -LiteralPath $InstanceFile) {
   try {
@@ -63,7 +60,7 @@ if (Test-Path -LiteralPath $InstanceFile) {
   } catch {}
 }
 
-$port = 8080
+$port = 8247
 while ($true) {
   try {
     $busy = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop).Count -gt 0

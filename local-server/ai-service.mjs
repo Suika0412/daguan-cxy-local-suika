@@ -4,11 +4,14 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { cipherTag, createSecretBackend, SECRET_FORMAT } from "./ai-secrets.mjs";
 
-const PROFILE_VERSION = 1;
+const PROFILE_VERSION = 2;
 const MAX_PROFILES = 12;
 const MAX_HISTORY_MESSAGES = 400;
 const REQUEST_TIMEOUT_MS = 90_000;
+// Keys shorter than this reveal no characters at all in keyHint.
+const MIN_HINT_LENGTH = 16;
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -51,6 +54,36 @@ export async function validateBaseUrl(value) {
   }
   if (parsed.protocol === "http:" && !privateNetwork) throw new Error("公网 AI 接口必须使用 HTTPS；本机或局域网服务可以使用 HTTP");
   return parsed.toString().replace(/\/+$/, "");
+}
+
+// Deterministic, DNS-free canonical form used to bind a saved Key to the exact
+// address it was entered for. It deliberately mirrors what `endpoint()` will
+// actually request: URL normalizes scheme/host case, default ports and dot
+// segments, and a trailing slash is dropped because `endpoint()` strips it
+// before joining. Internal duplicate slashes are PRESERVED, because
+// "/v1/models" and "//v1/models" are different request targets (a host can
+// reverse-proxy them to different backends), so they must count as a change.
+export function canonicalBaseUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  let parsed;
+  try { parsed = new URL(text); } catch { return ""; }
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+export function sameBaseUrl(left, right) {
+  const a = canonicalBaseUrl(left);
+  const b = canonicalBaseUrl(right);
+  return Boolean(a) && a === b;
+}
+
+// Fixed masking policy: short keys never reveal a single character, so a
+// truncated or paste-error Key can not be reconstructed from the hint.
+export function maskKeyHint(value) {
+  const key = String(value ?? "");
+  if (!key) return "未设置";
+  if (key.length < MIN_HINT_LENGTH) return "••••（已设置）";
+  return `${key.slice(0, 4)}••••${key.slice(-4)}`;
 }
 
 function endpoint(baseUrl, path) {
@@ -121,7 +154,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
   finally { clearTimeout(timer); }
 }
 
+// Public projection. Never returns `key`, `keyCipher` or `keyBaseUrl`: clients
+// learn only whether a usable Key exists, plus a fixed-length mask.
 function publicProfile(profile) {
+  const status = profile.keyStatus || "none";
+  const usable = status === "ok";
   return {
     id: profile.id,
     name: profile.name,
@@ -129,31 +166,45 @@ function publicProfile(profile) {
     model: profile.model,
     streaming: profile.streaming !== false,
     active: profile.active === true,
-    keyHint: profile.key ? `${profile.key.slice(0, 3)}••••${profile.key.slice(-3)}` : "未设置",
+    keyHint: usable ? (profile.keyHint || "已设置") : "未设置",
+    hasKey: usable,
+    keyStatus: status,
     capabilities: profile.capabilities || { text: false, vision: "unknown" },
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   };
 }
 
+// Capabilities are bounded to the keys the UI actually reads, so request input
+// (or a hand-edited file) can not smuggle arbitrary JSON into the profile.
+function normalizeCapabilities(value, existing = {}) {
+  const source = { ...object(existing), ...object(value) };
+  const capabilities = { text: source.text === true, vision: "unknown" };
+  if (source.vision === "passed" || source.vision === "failed" || source.vision === "unknown") capabilities.vision = source.vision;
+  // The timestamp only means something for a passed vision test.
+  if (capabilities.vision === "passed" && typeof source.visionTestedAt === "string") capabilities.visionTestedAt = safeText(source.visionTestedAt, 40);
+  return capabilities;
+}
+
+// Whitelisted input only. Security-relevant fields (`keyCipher`, `keyBaseUrl`,
+// `keyHint`, timestamps) are deliberately unreadable from request input so a
+// cross-site or local request can not rebind or replace a stored secret.
 function normalizeProfile(value, existing = {}) {
   const input = object(value);
   const profile = {
-    ...existing,
     id: existing.id || String(input.id || randomUUID()),
     name: safeText(input.name || existing.name || "新 AI 服务", 80).trim() || "新 AI 服务",
     baseUrl: safeText(input.baseUrl || existing.baseUrl || "", 500).trim(),
-    key: input.key === "" || input.key == null ? (existing.key || "") : safeText(input.key, 500).trim(),
     model: safeText(input.model || existing.model || "", 160).trim(),
     streaming: input.streaming == null ? existing.streaming !== false : input.streaming !== false,
     active: input.active == null ? existing.active === true : input.active === true,
-    capabilities: { ...(existing.capabilities || {}), ...(object(input.capabilities)) },
+    capabilities: normalizeCapabilities(input.capabilities, existing.capabilities),
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  if (!profile.capabilities.vision) profile.capabilities.vision = "unknown";
   return profile;
 }
+
 
 function parseModels(value) {
   const body = object(value);
@@ -168,8 +219,11 @@ function parseChatContent(value) {
   return visibleAnswer(message.content || choice.text || "");
 }
 
+// SSE writes must never throw: a client that vanished mid-stream must not turn
+// into an exception that skips run release in the caller's finally.
 function writeSse(res, value) {
-  res.write(`data: ${JSON.stringify(value)}\n\n`);
+  if (res.writableEnded || res.destroyed) return;
+  try { res.write(`data: ${JSON.stringify(value)}\n\n`); } catch { /* client already gone */ }
 }
 
 function xml(value) {
@@ -229,16 +283,185 @@ const TUTOR_SYSTEM_PROMPT = [
   "需要图形时，只能在末尾输出 daguan-diagram JSON 结构，不要输出或执行任意 Python 代码。不要声称已经完成无法验证的计算。",
 ].join("");
 
-export function createAiService({ store }) {
+export function createAiService({ store, secretBackend } = {}) {
   const runs = new Map();
+  const backend = createSecretBackend({ secretBackend });
+  // Plaintext keys resolved in this process, keyed by profile id.
+  const decrypted = new Map();
+  // Profiles whose cipher we already failed to open (or that belong to another
+  // cipher tag), so `profiles()` reports `unreadable` without re-spawning the
+  // DPAPI bridge on every call.
+  const unreadable = new Map();
+  let writeQueue = Promise.resolve();
 
-  async function readAll() {
+  // Serializes every read-modify-write of ai-profiles.json so concurrent
+  // upsert/remove/migrate calls cannot lose each other's updates.
+  function withLock(task) {
+    const previous = writeQueue;
+    let release;
+    writeQueue = new Promise((resolve) => { release = resolve; });
+    return (async () => {
+      await previous;
+      try { return await task(); } finally { release(); }
+    })();
+  }
+
+  // Error surfaces must never echo third-party text: a custom backend's
+  // `message` (or a child process's output) could carry credential material and
+  // would end up in an HTTP response or in a status report. Only a fixed
+  // description plus a whitelisted code is ever reported.
+  const ERROR_TEXT = {
+    SECRET_ENCRYPT_FAILED: "密钥加密失败",
+    SECRET_DECRYPT_FAILED: "密钥无法解密",
+    SECRET_BACKEND_UNAVAILABLE: "密钥存储后端不可用",
+    DATA_CORRUPT: "本地档案文件损坏",
+    DATA_READ_FAILED: "本地档案文件无法读取",
+  };
+
+  function errorCode(error, fallback = null) {
+    const code = typeof error?.code === "string" ? error.code : "";
+    // Object.hasOwn, not a plain lookup: a code such as "constructor",
+    // "toString" or "__proto__" must not resolve to an inherited member.
+    if (Object.hasOwn(ERROR_TEXT, code)) return code;
+    return fallback && Object.hasOwn(ERROR_TEXT, fallback) ? fallback : null;
+  }
+
+  function describeError(error, fallback = null) {
+    const code = errorCode(error, fallback);
+    return code ? `${ERROR_TEXT[code]}（${code}）` : "未知错误（无错误码）";
+  }
+
+  function errorLabel(error, fallback = null) {
+    const code = errorCode(error, fallback);
+    return code || "SECRET_UNKNOWN";
+  }
+
+  // The original error is kept only as `cause` for local debugging; it is never
+  // interpolated into the message that callers and HTTP clients can read.
+  function secretError(action, cause, fallbackCode) {
+    const code = errorCode(cause, fallbackCode);
+    const label = code ? `${ERROR_TEXT[code]}（${code}）` : "未知错误（无错误码）";
+    const error = new Error(`${action}：${label}`, cause ? { cause } : undefined);
+    error.code = code || fallbackCode || "SECRET_UNKNOWN";
+    return error;
+  }
+
+  function parseProfile(item) {
+    const source = object(item);
+    return {
+      id: String(source.id || randomUUID()),
+      name: safeText(source.name || "新 AI 服务", 80).trim() || "新 AI 服务",
+      baseUrl: safeText(source.baseUrl || "", 500).trim(),
+      model: safeText(source.model || "", 160).trim(),
+      streaming: source.streaming !== false,
+      active: source.active === true,
+      keyCipher: typeof source.keyCipher === "string" ? source.keyCipher : "",
+      keyBaseUrl: typeof source.keyBaseUrl === "string" ? source.keyBaseUrl : "",
+      keyHint: typeof source.keyHint === "string" ? source.keyHint : "",
+      legacyKey: typeof source.key === "string" ? source.key : "",
+      capabilities: normalizeCapabilities(source.capabilities),
+      createdAt: source.createdAt,
+      updatedAt: source.updatedAt,
+    };
+  }
+
+  async function readDocument() {
     const raw = object(await store.readAiProfiles());
-    return Array.isArray(raw.profiles) ? raw.profiles.map((item) => normalizeProfile(item, item)) : [];
+    const secret = object(raw.secret);
+    return {
+      fileBackend: secret.backend ? String(secret.backend) : null,
+      profiles: (Array.isArray(raw.profiles) ? raw.profiles : []).map(parseProfile),
+    };
+  }
+
+  async function readAll() { return (await readDocument()).profiles; }
+
+  // Usability of the stored credential, computable without decrypting it.
+  function statusOf(profile) {
+    if (profile.keyCipher) {
+      if (unreadable.has(profile.id)) return "unreadable";
+      const tag = cipherTag(profile.keyCipher);
+      if (backend.cipherTag && tag !== backend.cipherTag) return "unreadable";
+      if (!profile.keyBaseUrl) return "unreadable";
+      return "ok";
+    }
+    if (profile.legacyKey) return "unmigrated";
+    return "none";
+  }
+
+  function view(profile) {
+    return publicProfile({ ...profile, keyStatus: statusOf(profile) });
+  }
+
+  function serializeProfile(profile) {
+    const stored = {
+      id: profile.id,
+      name: profile.name,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      streaming: profile.streaming !== false,
+      active: profile.active === true,
+      capabilities: profile.capabilities || { text: false, vision: "unknown" },
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+    if (profile.keyCipher) {
+      stored.keyCipher = profile.keyCipher;
+      stored.keyBaseUrl = profile.keyBaseUrl;
+      stored.keyHint = profile.keyHint;
+    } else if (profile.legacyKey) {
+      // Only kept while encryption is impossible: an unrelated edit must never
+      // destroy a secret migration has not handled yet. It is never used for
+      // requests (status `unmigrated`).
+      stored.key = profile.legacyKey;
+    }
+    return stored;
   }
 
   async function saveAll(profiles) {
-    await store.writeAiProfiles({ version: PROFILE_VERSION, profiles: profiles.slice(0, MAX_PROFILES) });
+    await store.writeAiProfiles({
+      version: PROFILE_VERSION,
+      secret: { format: SECRET_FORMAT, backend: backend.id },
+      profiles: profiles.slice(0, MAX_PROFILES).map(serializeProfile),
+    });
+  }
+
+  // A cipher may only be written when the backend can both encrypt and keep the
+  // key material across restarts. Single source of truth for upsert and migrate.
+  function canPersistCipher() {
+    return backend.persistent === true && backend.encrypted === true;
+  }
+
+  async function protectKey(value) {
+    try {
+      return await backend.protect(value);
+    } catch (cause) {
+      throw secretError("无法加密保存 Key，密钥未写入。请检查当前环境的密钥存储后端", cause, "SECRET_ENCRYPT_FAILED");
+    }
+  }
+
+  async function decryptKey(profile) {
+    const cached = decrypted.get(profile.id);
+    if (cached && cached.cipher === profile.keyCipher) return cached.value;
+    try {
+      const value = await backend.unprotect(profile.keyCipher);
+      decrypted.set(profile.id, { cipher: profile.keyCipher, value });
+      unreadable.delete(profile.id);
+      return value;
+    } catch (cause) {
+      unreadable.set(profile.id, errorCode(cause, "SECRET_DECRYPT_FAILED") || "SECRET_DECRYPT_FAILED");
+      throw secretError("无法读取已保存的 Key，密文已保留。请重新填写 Key", cause, "SECRET_DECRYPT_FAILED");
+    }
+  }
+
+  // Fail-closed gate for every outbound request that could carry a credential.
+  function requireUsableSecret(profile, baseUrl) {
+    const status = statusOf(profile);
+    if (status === "none") return false;
+    if (status === "unmigrated") throw new Error("该 AI 服务的 Key 尚未完成加密迁移，已停止使用旧明文凭据。请重新填写 Key。");
+    if (status === "unreadable") throw new Error("该 AI 服务的 Key 密文无法在本机读取（可能来自其他存储后端、其他 Windows 账户或其他机器）。密文已保留，请重新填写 Key。");
+    if (!sameBaseUrl(profile.keyBaseUrl, baseUrl)) throw new Error("AI API 地址已变更，已停止把已保存的 Key 发送到新地址。请重新填写 Key，或清除 Key 后使用无需 Key 的服务。");
+    return true;
   }
 
   async function getProfile(id, { requireModel = true } = {}) {
@@ -246,37 +469,249 @@ export function createAiService({ store }) {
     if (!profile) throw new Error("AI 服务档案不存在");
     if (!profile.baseUrl) throw new Error("请先填写 AI API 地址");
     if (requireModel && !profile.model) throw new Error("请先选择或填写 AI 模型");
-    return { ...profile, baseUrl: await validateBaseUrl(profile.baseUrl) };
+    const baseUrl = await validateBaseUrl(profile.baseUrl);
+    const bound = requireUsableSecret(profile, baseUrl);
+    const key = bound ? await decryptKey(profile) : "";
+    return { ...profile, baseUrl, key };
   }
 
-  async function profiles() { return (await readAll()).map(publicProfile); }
+  async function profiles() { return (await readAll()).map(view); }
 
   async function upsert(input) {
-    const all = await readAll();
-    const existing = input?.id ? all.find((item) => item.id === String(input.id)) : null;
-    if (input?.id && !existing) throw new Error("AI 服务档案不存在，请重新选择");
-    if (!existing && all.length >= MAX_PROFILES) throw new Error(`最多保存 ${MAX_PROFILES} 个 AI 服务，请先删除不用的服务`);
-    const next = normalizeProfile(input, existing || {});
-    next.baseUrl = await validateBaseUrl(next.baseUrl);
-    if (!next.active && !all.length) next.active = true;
-    if (next.active) all.forEach((item) => { item.active = false; });
-    const index = all.findIndex((item) => item.id === next.id);
-    if (index >= 0) all[index] = next; else all.push(next);
-    await saveAll(all);
-    return publicProfile(next);
+    return withLock(async () => {
+      const all = await readAll();
+      const request = object(input);
+      const existing = request.id ? all.find((item) => item.id === String(request.id)) : null;
+      if (request.id && !existing) throw new Error("AI 服务档案不存在，请重新选择");
+      if (!existing && all.length >= MAX_PROFILES) throw new Error(`最多保存 ${MAX_PROFILES} 个 AI 服务，请先删除不用的服务`);
+      const next = normalizeProfile(request, existing || {});
+      next.baseUrl = await validateBaseUrl(next.baseUrl);
+      const nextBaseUrl = canonicalBaseUrl(next.baseUrl);
+      const providedKey = typeof request.key === "string" ? request.key.trim() : "";
+
+      let keyCipher = existing?.keyCipher || "";
+      let keyBaseUrl = existing?.keyBaseUrl || "";
+      let keyHint = existing?.keyHint || "";
+      let legacyKey = existing?.legacyKey || "";
+      let keyCleared = false;
+      let warning = null;
+
+      if (request.clearKey === true) {
+        keyCleared = Boolean(keyCipher || legacyKey);
+        keyCipher = ""; keyBaseUrl = ""; keyHint = ""; legacyKey = "";
+      } else if (providedKey) {
+        // A Key may only be stored as a cipher that will still be readable later.
+        // With a non-persistent (or non-encrypting) backend there is no such
+        // cipher, so this fails closed instead of writing one that a restart
+        // would turn into an unreadable blob.
+        if (!canPersistCipher()) {
+          // Fail closed with fixed text: no user or third-party data is echoed.
+          const error = new Error("当前密钥存储后端不持久化或未加密，拒绝把 Key 写入档案（SECRET_BACKEND_UNAVAILABLE）。档案未被修改，Key 需要可持久加密的后端才能保存。");
+          error.code = "SECRET_BACKEND_UNAVAILABLE";
+          throw error;
+        }
+        keyCipher = await protectKey(providedKey);
+        keyBaseUrl = nextBaseUrl;
+        keyHint = maskKeyHint(providedKey);
+        legacyKey = "";
+      } else if (keyCipher) {
+        // No new Key supplied: it may only be reused for the very same address,
+        // so a changed baseUrl can never forward the stored credential.
+        if (!keyBaseUrl || keyBaseUrl !== nextBaseUrl) {
+          keyCipher = ""; keyBaseUrl = ""; keyHint = ""; keyCleared = true;
+          warning = `AI API 地址已变更为 ${next.baseUrl}，旧 Key 已清除以避免发送到新地址。如新地址仍需该 Key，请重新填写。`;
+        }
+      } else if (legacyKey) {
+        // Plaintext left behind by a failed migration. An unrelated edit must
+        // never turn it into a cipher that a restart cannot read, so it is only
+        // encrypted when the backend can actually persist one; otherwise the
+        // plaintext is preserved verbatim (still never used for requests).
+        if (existing?.baseUrl && canonicalBaseUrl(existing.baseUrl) === nextBaseUrl) {
+          if (!canPersistCipher()) {
+            warning = "旧明文 Key 已原样保留（当前密钥存储后端不持久化或未加密，不做迁移），它不会被用于请求。请重新填写 Key。";
+          } else {
+            try {
+              keyCipher = await protectKey(legacyKey);
+              keyBaseUrl = nextBaseUrl;
+              keyHint = maskKeyHint(legacyKey);
+              legacyKey = "";
+            } catch (cause) {
+              warning = `旧明文 Key 仍未完成加密（${describeError(cause, "SECRET_ENCRYPT_FAILED")}），已原样保留但不会用于请求。请重新填写 Key。`;
+            }
+          }
+        } else {
+          legacyKey = "";
+          keyCleared = true;
+          warning = `AI API 地址已变更为 ${next.baseUrl}，未完成迁移的旧明文 Key 已清除以避免发送到新地址。请重新填写 Key。`;
+        }
+      }
+
+      const stored = { ...next, keyCipher, keyBaseUrl, keyHint, legacyKey };
+      if (!stored.active && !all.length) stored.active = true;
+      if (stored.active) all.forEach((item) => { item.active = false; });
+      const index = all.findIndex((item) => item.id === stored.id);
+      if (index >= 0) all[index] = stored; else all.push(stored);
+      await saveAll(all);
+      // Caches only follow an actual cipher change: an unrelated edit (rename,
+      // model change) must not make an unreadable secret look healthy again.
+      if ((existing?.keyCipher || "") !== keyCipher || !keyCipher) {
+        decrypted.delete(stored.id);
+        unreadable.delete(stored.id);
+      }
+      return { ...view(stored), keyCleared, warning };
+    });
   }
 
   async function remove(id, clearHistory = false) {
-    const all = await readAll();
-    const profile = all.find((item) => item.id === String(id));
-    if (!profile) throw new Error("AI 服务档案不存在");
-    await saveAll(all.filter((item) => item.id !== profile.id));
+    const profile = await withLock(async () => {
+      const all = await readAll();
+      const found = all.find((item) => item.id === String(id));
+      if (!found) throw new Error("AI 服务档案不存在");
+      await saveAll(all.filter((item) => item.id !== found.id));
+      decrypted.delete(found.id);
+      unreadable.delete(found.id);
+      return found;
+    });
     if (clearHistory) {
       const files = await store.aiHistoryFiles();
       const prefix = `${profileKey(profile.id)}--`;
       await Promise.all(files.filter((file) => file.startsWith(prefix)).map((file) => store.clearAiHistory(file.slice(0, -5))));
     }
     return { ok: true };
+  }
+
+  // Any edit of a profile goes through the same lock and re-reads the file, so
+  // capability updates can not resurrect a deleted profile or drop a secret.
+  async function patchProfile(id, patch) {
+    return withLock(async () => {
+      const all = await readAll();
+      const index = all.findIndex((item) => item.id === String(id));
+      if (index < 0) return null;
+      const updated = { ...patch(all[index]), updatedAt: new Date().toISOString() };
+      all[index] = updated;
+      await saveAll(all);
+      return view(updated);
+    });
+  }
+
+  function statusSnapshot(profilesList, extra = {}) {
+    const keyStates = { ok: 0, none: 0, unmigrated: 0, unreadable: 0 };
+    for (const profile of profilesList) {
+      const status = statusOf(profile);
+      if (keyStates[status] != null) keyStates[status] += 1;
+    }
+    return {
+      backend: { id: backend.id, cipherTag: backend.cipherTag, persistent: backend.persistent, encrypted: backend.encrypted, description: backend.description },
+      keyStorage: backend.id,
+      persistent: backend.persistent,
+      encrypted: backend.encrypted,
+      canPersistSecrets: backend.persistent === true && backend.encrypted === true,
+      profileCount: profilesList.length,
+      keyStates,
+      profiles: profilesList.map(view),
+      ...extra,
+    };
+  }
+
+  async function storageStatus() {
+    let profilesList = [];
+    let lastError = null;
+    let corrupt = false;
+    let fileBackend = null;
+    try {
+      const document = await readDocument();
+      profilesList = document.profiles;
+      fileBackend = document.fileBackend;
+    } catch (cause) {
+      lastError = describeError(cause);
+      corrupt = cause?.code === "DATA_CORRUPT";
+    }
+    let available = false;
+    try { available = (await backend.available()) === true; } catch { available = false; }
+    const warnings = [];
+    if (!backend.persistent) warnings.push("当前密钥后端不持久化：服务重启后已保存的 Key 无法解密，需要重新填写（不会退回明文保存）。");
+    if (backend.id === "memory") warnings.push("当前环境不支持保存 Key，只能使用无需 Key 的服务。");
+    if (!canPersistCipher()) warnings.push("当前环境不支持保存 Key（缺少可持久加密的密钥后端），只能使用无需 Key 的服务。");
+    if (fileBackend && fileBackend !== backend.id) warnings.push(`档案由「${fileBackend}」后端写入，当前运行在「${backend.id}」后端，其中的密文无法解密。`);
+    if (corrupt) warnings.push("本地 AI 档案已损坏，未做任何改动，请检查文件或从备份恢复。");
+    const snapshot = statusSnapshot(profilesList, { available, lastError, corrupt, fileBackend, warnings });
+    snapshot.backend.available = available;
+    // Declared capability is not enough: a backend that can not encrypt right
+    // now can not persist secrets, so callers get a fail-closed answer.
+    snapshot.canPersistSecrets = snapshot.persistent === true && snapshot.encrypted === true && available === true;
+    return snapshot;
+  }
+
+  // One-shot migration of legacy plaintext Keys. Never throws, never rewrites a
+  // corrupt file, and preserves the plaintext (rather than destroying it) if any
+  // single Key can not be encrypted.
+  async function migrate() {
+    try {
+      return await withLock(async () => {
+        let document;
+        try {
+          document = await readDocument();
+        } catch (cause) {
+          const corrupt = cause?.code === "DATA_CORRUPT";
+          return statusSnapshot([], {
+            ok: false, corrupt, migrated: 0, preserved: 0, failed: 0, skipped: 0,
+            lastError: describeError(cause),
+            warnings: [corrupt ? "本地 AI 档案已损坏，已跳过迁移且未改动文件。" : "本地 AI 档案无法读取，已跳过迁移且未改动文件。"],
+          });
+        }
+        let migrated = 0;
+        let preserved = 0;
+        let failed = 0;
+        const warnings = [];
+        const next = [];
+        for (const profile of document.profiles) {
+          if (profile.keyCipher || !profile.legacyKey) { next.push(profile); continue; }
+          if (!canPersistCipher()) {
+            // A non-persistent backend would produce ciphertext that is
+            // unreadable after restart, so the plaintext Key is preserved
+            // instead of being replaced by an unrecoverable blob.
+            preserved += 1;
+            next.push(profile);
+            continue;
+          }
+          try {
+            const cipher = await protectKey(profile.legacyKey);
+            next.push({
+              ...profile,
+              keyCipher: cipher,
+              keyBaseUrl: canonicalBaseUrl(profile.baseUrl),
+              keyHint: maskKeyHint(profile.legacyKey),
+              legacyKey: "",
+            });
+            migrated += 1;
+          } catch (cause) {
+            failed += 1;
+            warnings.push(`档案「${profile.name}」的 Key 加密失败（${errorLabel(cause, "SECRET_ENCRYPT_FAILED")}）`);
+            next.push(profile);
+          }
+        }
+        if (preserved > 0) warnings.push(`当前密钥后端不持久化，${preserved} 个旧明文 Key 未被覆盖迁移（保留原状）。`);
+        if (failed > 0) {
+          // Do not write at all: a partial rewrite could destroy un-migrated Keys.
+          return statusSnapshot(document.profiles, {
+            ok: false, corrupt: false, migrated, preserved, failed, skipped: 0,
+            lastError: warnings[0] || null,
+            warnings: [...warnings, "迁移未完成，已保留原文件内容，下次启动会重试。"],
+          });
+        }
+        if (migrated > 0) {
+          await saveAll(next);
+          for (const profile of next) decrypted.delete(profile.id);
+        }
+        return statusSnapshot(next, { ok: true, corrupt: false, migrated, preserved, failed: 0, skipped: 0, lastError: null, warnings });
+      });
+    } catch (cause) {
+      return statusSnapshot([], {
+        ok: false, corrupt: cause?.code === "DATA_CORRUPT", migrated: 0, preserved: 0, failed: 0, skipped: 0,
+        lastError: describeError(cause),
+        warnings: ["密钥迁移未能完成，已保留原文件内容。"],
+      });
+    }
   }
 
   async function models(id) {
@@ -291,7 +726,6 @@ export function createAiService({ store }) {
   }
 
   async function test(id, kind = "text") {
-    const all = await readAll();
     const profile = await getProfile(id);
     const started = Date.now();
     let content;
@@ -309,8 +743,11 @@ export function createAiService({ store }) {
     try { parsed = JSON.parse(text); } catch { throw new Error("模型测试返回的不是 JSON"); }
     content = parseChatContent(parsed);
     if (!content.trim()) throw new Error("模型测试未返回正式答案，请检查模型或重试");
-    const updated = all.map((item) => item.id === profile.id ? { ...item, capabilities: { ...(item.capabilities || {}), text: true, ...(kind === "vision" ? { vision: "passed", visionTestedAt: new Date().toISOString() } : {}) }, updatedAt: new Date().toISOString() } : item);
-    await saveAll(updated);
+    const updated = await patchProfile(profile.id, (item) => ({
+      ...item,
+      capabilities: { ...(item.capabilities || {}), text: true, ...(kind === "vision" ? { vision: "passed", visionTestedAt: new Date().toISOString() } : {}) },
+    }));
+    if (!updated) throw new Error("AI 服务档案不存在");
     return { ok: true, kind, status: response.status, latencyMs: Date.now() - started, model: profile.model, response: content.slice(0, 2000), usage: parsed.usage || null };
   }
 
@@ -332,6 +769,9 @@ export function createAiService({ store }) {
   }
 
   async function streamChat(req, res, payload) {
+    // A response that can no longer be written to must not register a run:
+    // otherwise every such call would leak one of the two run slots.
+    if (res.writableEnded || res.destroyed) return;
     if (runs.size >= 2) throw new Error("当前已有两个 AI 任务在生成，请稍后再试");
     const profile = await getProfile(payload.profileId);
     const questionId = String(object(payload.question).id || "unknown");
@@ -352,12 +792,16 @@ export function createAiService({ store }) {
     const controller = new AbortController();
     runs.set(runId, { controller });
     const timeout = setTimeout(() => controller.abort(new Error("AI 请求超时")), REQUEST_TIMEOUT_MS);
-    let answer = "";
-    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Daguan-Run-Id": runId });
-    writeSse(res, { type: "started", runId, historyTruncated: historyMessages.length >= 24 });
     const abortOnClose = () => controller.abort(new Error("浏览器已断开 AI 请求"));
     res.once("close", abortOnClose);
+    let answer = "";
     try {
+      // Every write after the run is registered stays inside this try, so any
+      // failure here still reaches the finally that releases the run.
+      if (!res.headersSent) {
+        res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Daguan-Run-Id": runId });
+      }
+      writeSse(res, { type: "started", runId, historyTruncated: historyMessages.length >= 24 });
       const upstream = await fetch(endpoint(profile.baseUrl, "chat/completions"), {
         method: "POST",
         headers: { ...authHeaders(profile), Accept: "text/event-stream, application/json" },
@@ -416,7 +860,10 @@ export function createAiService({ store }) {
       clearTimeout(timeout);
       res.off("close", abortOnClose);
       runs.delete(runId);
-      res.end();
+      // Cleanup must never throw: a failure here would skip the run release.
+      if (!res.writableEnded && !res.destroyed) {
+        try { res.end(); } catch { /* client already gone */ }
+      }
     }
   }
 
@@ -440,5 +887,8 @@ export function createAiService({ store }) {
     return { engine: "svg", svg: safeSvg(input) };
   }
 
-  return { profiles, upsert, remove, models, test, streamChat, conversation, clearConversation, diagram, stop: (runId) => { const run = runs.get(String(runId)); if (!run) return false; run.controller.abort(new Error("用户停止了 AI 请求")); return true; } };
+  return {
+    secretStorage: { id: backend.id, persistent: backend.persistent, encrypted: backend.encrypted, description: backend.description },
+    migrate, storageStatus, profiles, upsert, remove, models, test, streamChat, conversation, clearConversation, diagram, stop: (runId) => { const run = runs.get(String(runId)); if (!run) return false; run.controller.abort(new Error("用户停止了 AI 请求")); return true; },
+  };
 }

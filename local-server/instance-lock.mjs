@@ -83,7 +83,7 @@ export async function isServiceOwnerProcessGone(dataDir, expectedOwner) {
   return matches((await readOwner(lockPath)).owner);
 }
 
-export async function acquireServiceInstance(dataDir, { host = "127.0.0.1", port = 8080 } = {}) {
+export async function acquireServiceInstance(dataDir, { host = "127.0.0.1", port = 8247 } = {}) {
   const resolvedDataDir = path.resolve(dataDir);
   await fs.mkdir(resolvedDataDir, { recursive: true });
   const lockPath = path.join(resolvedDataDir, LOCK_NAME);
