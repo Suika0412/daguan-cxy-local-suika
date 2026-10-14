@@ -415,6 +415,81 @@ test('新版图片聊天：纯文本粘贴不拦截，未通过 vision 时图文
  assert.equal(errors.length,0,errors.join('\n'));
 });
 
+test('新版图片聊天：单题页取消导航/跳当前题后，附件题号归属仍与面板一致，附图可发送', {skip,timeout:60000},async t=>{
+ const {page,calls,errors}=await imageFixture(t);
+ await page.evaluate(installPngHelper);await openAI(page);await page.waitForSelector('#ai-attach-btn');
+ const qid=await page.evaluate(()=>String(AppState.questions[AppState.currentQuestionIndex].id));
+ // 在第一题点「上一题」：越界时 ensureSavedBeforeLeavingQuestion 仍会中止并清空附件状态，
+ // 但页面未换题、面板未重建。此前 reset() 会把附件归属置空而与面板 dataset 分叉。
+ await page.evaluate(()=>App.previousQuestion());await page.evaluate(()=>new Promise(r=>setTimeout(r,600)));
+ assert.equal(await page.evaluate(()=>String(AppState.questions[AppState.currentQuestionIndex].id)),qid,'越界导航后仍停在原题');
+ assert.equal(await page.evaluate(()=>document.getElementById('ai-panel').dataset.questionId),qid,'面板仍绑定当前题');
+ // 跳题输入当前题号：同一路径（abort 后 renderQuestion 同题复用面板）
+ await page.evaluate(async()=>{await App.jumpByQuestionNumber(String(AppState.questions[AppState.currentQuestionIndex].id));});
+ await page.evaluate(()=>new Promise(r=>setTimeout(r,800)));
+ assert.equal(await page.evaluate(()=>document.getElementById('ai-panel').dataset.questionId),qid,'跳当前题后面板题号不变');
+ // 附图后发送必须真正发出，且携带本题号与图片
+ const expect=dataUrl(PNG_1X1);
+ await page.evaluate(({b64})=>window.__png.drop(window.__png.make(b64,'越界后.png')),{b64:PNG_1X1});
+ await page.waitForFunction(()=>document.querySelectorAll('#ai-attachment-previews .ai-attachment:not(.ai-attachment-reading)').length===1);
+ await page.locator('#ai-input').fill('我这个理解对吗?');
+ const before=calls.length;
+ await page.locator('#ai-send-btn').click();
+ await page.waitForFunction('!AppState.aiBusy');
+ assert.equal(calls.length,before+1,'取消导航后附图仍能发出请求');
+ const parts=calls.at(-1).messages.at(-1).content;
+ assert.ok(Array.isArray(parts),'图文请求 content 为数组');
+ assert.equal(parts[1].image_url.url,expect,'附件完整随请求发出');
+ assert.match(parts[0].text,new RegExp(`题号：\\s*${qid}`),'请求上下文题号与面板一致');
+ assert.equal(errors.length,0,errors.join('\n'));
+});
+
+test('新版图片聊天：连续做题滚动换题同步面板题号，附图发送归属滚动后当前题', {skip,timeout:60000},async t=>{
+ const {page,calls,errors}=await imageFixture(t);
+ await page.evaluate(installPngHelper);await openAI(page);await page.waitForSelector('#ai-attach-btn');
+ await page.evaluate(async()=>{await App.changeQuestionMode('multi');});
+ await page.waitForSelector('.multi-question-card');
+ await page.evaluate(()=>new Promise(r=>setTimeout(r,300)));
+ const firstQid=await page.evaluate(()=>String(AppState.questions[AppState.currentQuestionIndex].id));
+ // 主区滚动使 currentQuestionIndex 切换；面板题号必须同步，否则附件守卫会拒绝发送
+ await page.evaluate(async()=>{const m=document.getElementById('app-main');const c=[...document.querySelectorAll('.multi-question-card')];m.scrollTop=c[3].offsetTop;await new Promise(r=>setTimeout(r,700));});
+ const newQid=await page.evaluate(()=>String(AppState.questions[AppState.currentQuestionIndex].id));
+ assert.notEqual(newQid,firstQid,'滚动已切换当前题');
+ assert.equal(await page.evaluate(()=>document.getElementById('ai-panel').dataset.questionId),newQid,'滚动换题后面板题号同步');
+ await page.evaluate(({b64})=>window.__png.drop(window.__png.make(b64,'滚动后.png')),{b64:PNG_1X1});
+ await page.waitForFunction(()=>document.querySelectorAll('#ai-attachment-previews .ai-attachment:not(.ai-attachment-reading)').length===1);
+ await page.locator('#ai-input').fill('我这个理解对吗?');
+ const before=calls.length;
+ await page.locator('#ai-send-btn').click();
+ await page.waitForFunction('!AppState.aiBusy');
+ assert.equal(calls.length,before+1,'滚动换题后附图能发出请求');
+ const parts=calls.at(-1).messages.at(-1).content;
+ assert.ok(Array.isArray(parts),'图文请求 content 为数组');
+ assert.equal(parts[1].image_url.url,dataUrl(PNG_1X1),'附件随请求发出');
+ assert.match(parts[0].text,new RegExp(`题号：\\s*${newQid}`),'请求上下文题号是滚动后的当前题');
+ assert.equal(errors.length,0,errors.join('\n'));
+});
+
+test('新版图片聊天：换题后发送不得把上一题的图片带给新题', {skip,timeout:60000},async t=>{
+ const {page,calls,errors}=await imageFixture(t);
+ await page.evaluate(installPngHelper);await openAI(page);await page.waitForSelector('#ai-attach-btn');
+ await page.evaluate(({b64})=>window.__png.drop(window.__png.make(b64,'上一题.png')),{b64:PNG_1X1});
+ await page.waitForFunction(()=>document.querySelectorAll('#ai-attachment-previews .ai-attachment:not(.ai-attachment-reading)').length===1);
+ const aQid=await page.evaluate(()=>String(AppState.questions[AppState.currentQuestionIndex].id));
+ await page.evaluate(async()=>{await App.nextQuestion();});
+ await page.waitForFunction(id=>String(AppState.questions[AppState.currentQuestionIndex].id)!==id,aQid);
+ await page.waitForFunction(()=>document.querySelectorAll('#ai-attachment-previews .ai-attachment').length===0);
+ await page.locator('#ai-input').fill('这是新题的问题');
+ const before=calls.length;
+ await page.locator('#ai-send-btn').click();
+ await page.waitForFunction('!AppState.aiBusy');
+ assert.equal(calls.length,before+1,'新题仍可发送');
+ const last=calls.at(-1).messages.at(-1).content;
+ assert.equal(Array.isArray(last),false,'A 的图片没有进入 B 的请求');
+ assert.match(String(last),/这是新题的问题/);
+ assert.equal(errors.length,0,errors.join('\n'));
+});
+
 test('新版图片聊天：旧版 localStorage 偏好下，index.html?ui=new 仍停留在新版', {skip,timeout:60000},async t=>{
  const {base,page,errors}=await imageFixture(t);
  await page.evaluate(()=>localStorage.setItem('daguan_ui_version_v1','old'));

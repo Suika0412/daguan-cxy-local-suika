@@ -53,8 +53,16 @@ class AIAttachments {
         return this;
     }
 
+    // 静默中止（abortAIStream）会调用：清空附件并作废在途读取。
+    // 题号归属必须继续跟随存活面板：abort 也会在并未真正换题的路径上执行
+    // （单题页越界点「上一题/下一题」、跳题输入当前题号），此时面板未重建、
+    // dataset.questionId 仍是当前题，若把 questionId 置空就会与面板分叉，
+    // 之后附图发送会被附件一致性守卫误判为「状态已变化」。面板不存在时题号自然为空，
+    // 随后 renderAIPanel→bindPanel 会重新建立归属。
     reset() {
-        this.questionId = '';
+        const panel = document.getElementById('ai-panel');
+        this.panel = panel || null;
+        this.questionId = panel?.dataset?.questionId || '';
         this.invalidate();
         this.items = [];
         this.render();

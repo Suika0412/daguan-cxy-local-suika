@@ -934,6 +934,30 @@ test('切题清理：forQuestion 换题即清空并刷新预览，abortAIStream 
   assert.equal(context.AppState.aiBusy, false);
 });
 
+test('未真正换题的中止：abortAIStream 清空附件后，附件归属必须与仍存活的面板题号一致', async () => {
+  const context = createContext();
+  context.api.AIAttachments.bindPanel(context.panel, question());
+  await addFiles(context, [fakeFile({ name: '图.png', type: 'image/png' })]);
+  assert.equal(context.api.AIAttachments.items.length, 1);
+
+  // 单题页越界点「上一题/下一题」、跳题输入当前题号都会执行 abortAIStream：面板未重建，dataset 仍是当前题。
+  context.app.abortAIStream();
+  assert.equal(context.api.AIAttachments.items.length, 0, 'abort 后清空附件');
+  assert.equal(context.api.AIAttachments.questionId, '331', '附件归属跟随仍存活的面板题号');
+  assert.equal(context.api.AIAttachments.panel, context.panel, '附件仍绑定原面板');
+
+  // 归属一致后，同一题重新附图并发送，必须真正发出请求并带上图片。
+  await addFiles(context, [fakeFile({ name: '再来.png', type: 'image/png' })]);
+  assert.equal(context.api.AIAttachments.questionId, '331');
+  useProfile(context, 'passed');
+  const { asked } = mockChat(context);
+  context.input.value = '我这个理解对吗?';
+  await context.app.sendAIMessage();
+  assert.equal(asked.length, 1, '中止后同题附图仍能发送');
+  assert.equal(asked[0].images.length, 1, '图片随请求发出');
+  assert.equal(context.toasts.length, 0, '不得出现附件状态已变化的拒绝提示');
+});
+
 test('请求体契约：images 为 dataURL 数组原样透传，整包校验按 UTF-8 字节计', async () => {
   const context = createContext();
   let captured = null;

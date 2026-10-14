@@ -5,7 +5,7 @@
 
 // ========== 离线缓存注册（与 app2.js 一致） ==========
 if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=166").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=167").catch(() => {});
 }
 
 // ========== 全局状态 ==========
@@ -1397,6 +1397,10 @@ class UIRenderer {
                 App.recordVisit(question.id, AppState.currentCategory.id, AppState.currentChapter.id);
                 void StateSync.pushLastStudy(AppState.currentChapter.id, question.id, 'multi');
                 main.querySelectorAll('.question-rail-item').forEach(button => button.classList.toggle('current', button.dataset.questionId === String(question.id)));
+                // 滚动换题与跳题（goToChapterQuestion）一样要刷新 AI 面板：面板题号与图片附件归属
+                // 只在 renderAIPanel 时更新，否则面板仍绑定上一题，滚动后附图发送会被附件一致性
+                // 守卫拦下（提示后无请求），而纯文本因无附件跳过守卫仍可发送。
+                if (AppState.ui.aiPanelOpen) UIRenderer.renderAIPanel();
             }, 180);
         };
         const selected = AppState.questions[AppState.currentQuestionIndex];

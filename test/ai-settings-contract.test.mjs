@@ -228,9 +228,9 @@ test("页面与 Service Worker 引用同步到新版本", () => {
   }
   assert.ok(sw.includes('"./ai-settings.js?v=2"'));
   assert.ok(sw.includes('"./ai-services.css?v=2"'));
-  assert.match(sw, /daguan-shell-v166/);
-  // 旧版入口保持既有 165 注册；新版入口跟随本次 166。
-  for (const [app, version] of [["app-new.js", "166"], ["app-legacy.js", "165"], ["app2.js", "165"]]) {
+  assert.match(sw, /daguan-shell-v167/);
+  // 旧版入口保持既有 165 注册；新版入口跟随本次 167。
+  for (const [app, version] of [["app-new.js", "167"], ["app-legacy.js", "165"], ["app2.js", "165"]]) {
     const text = fs.readFileSync(new URL(`../web/${app}`, import.meta.url), "utf8");
     assert.ok(text.includes(`service-worker.js?v=${version}`), app);
   }
