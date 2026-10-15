@@ -8,7 +8,7 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="stylesheet" href="./vendor/katex.min.css" />
     <link rel="stylesheet" href="./legacy.css?v=96" />
-  <link rel="stylesheet" href="./ai-services.css?v=2" />
+  <link rel="stylesheet" href="./ai-services.css?v=3" />
   <link rel="stylesheet" href="./guides.css?v=2" />
   <link rel="stylesheet" href="./browser-retirement.css?v=1" />
   <script src="./ui-version.js?v=106"></script>
@@ -343,12 +343,13 @@
     <div class="ai-resize-handle" id="ai-resize-handle" role="separator" aria-orientation="vertical" aria-label="调整 AI 抽屉宽度" aria-valuemin="340" aria-valuemax="620" aria-valuenow="400" tabindex="0"></div>
     <div class="ai-drawer-head">
       <div><p class="dialog-kicker">学习助手</p><h2 id="ai-drawer-title">AI 解答</h2><p class="ai-context-line" id="ai-context-line">先选择一道题</p></div>
-      <button type="button" class="icon-btn" id="btn-ai-close" aria-label="关闭 AI 解答"><svg class="ui-icon"><use href="#icon-close"></use></svg></button>
+      <div class="ai-drawer-head-actions"><button type="button" class="btn ghost" id="ai-clear-btn" aria-label="清空当前临时对话">清空</button><button type="button" class="icon-btn" id="btn-ai-close" aria-label="关闭 AI 解答"><svg class="ui-icon"><use href="#icon-close"></use></svg></button></div>
     </div>
     <div class="ai-tabs" role="tablist"><button type="button" class="ai-tab active" id="ai-tab-chat" data-ai-tab="chat" role="tab" aria-selected="true">AI 解答</button><button type="button" class="ai-tab" id="ai-tab-note" data-ai-tab="note" role="tab" aria-selected="false">题目批注</button></div>
     <div class="ai-drawer-body">
       <section class="ai-panel" id="ai-chat-panel" data-ai-panel="chat">
         <label class="ai-streaming-control"><input type="checkbox" id="ai-streaming-legacy"> 流式回答</label><div class="ai-profile-row"><label for="ai-profile-select">服务</label><select id="ai-profile-select" data-ai-service-control="true"><option value="">未配置 AI</option></select><button type="button" class="btn ghost" id="btn-ai-settings">设置</button></div>
+        <div class="ai-profile-row"><label for="ai-reasoning-preset">思考档位</label><select id="ai-reasoning-preset" data-ai-service-control="true" aria-label="思考档位"></select></div>
         <div class="ai-privacy-note" id="ai-privacy-note">已附带题干、选项、答案和解析；本地批注与掌握状态不会发送。</div>
         <div class="ai-messages" id="ai-messages" aria-live="polite"><div class="ai-empty"><svg class="ui-icon"><use href="#icon-spark"></use></svg><strong>先问一个问题</strong><p>题目上下文已经准备好，选择下方提示或直接输入你的疑问。</p></div></div>
         <div class="ai-suggestions" id="ai-suggestions">
@@ -788,7 +789,7 @@
 
   <script defer src="./vendor/marked.min.js"></script>
   <script defer src="./vendor/katex.min.js"></script>
-  <script defer src="./ai-settings.js?v=2"></script>
+  <script defer src="./ai-settings.js?v=3"></script>
   <script defer src="./ai-panel-layout.js?v=1"></script>
   <script defer src="./section-celebration.js?v=1"></script>
   <script defer src="./choice-grading.js?v=1"></script>
@@ -798,7 +799,7 @@
   <script defer src="./source-taxonomy.js?v=1"></script>
   <script defer src="./vendor/purify.min.js"></script>
   <script defer src="./safe-render.js?v=5"></script>
-  <script defer src="./app-legacy.js?v=121"></script>
+  <script defer src="./app-legacy.js?v=122"></script>
     <script defer src="./remote-access.js?v=1"></script>
   <script defer src="./browser-retirement.js?v=1"></script>
 </body>

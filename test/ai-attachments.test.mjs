@@ -210,7 +210,7 @@ function createContext() {
     getApp: () => app,
   });
   // facade 只暴露原实现里确实存在的 App 方法；附件内部方法一概没有。
-  for (const name of ['sendAIMessage', 'retryAIMessage', 'aiBusyUi', 'abortAIStream']) {
+  for (const name of ['sendAIMessage', 'retryAIMessage', 'aiBusyUi', 'abortAIStream', 'clearAIChat']) {
     app[name] = (...args) => api.AIController[name].apply(app, args);
   }
   // navigate 是 App 自身的方法（facade 不转发），按真实情况提供。
@@ -238,10 +238,14 @@ function createContext() {
   fileInput.files = [];
   const sendButton = document.createElement('button');
   sendButton.setAttribute('id', 'ai-send-btn');
+  // 真实新面板里的思考档位选择框：默认空值 = 模型默认，契约要求始终发送该字段（不省略）。
+  const reasoningSelect = document.createElement('select');
+  reasoningSelect.setAttribute('id', 'ai-reasoning-preset-new');
+  reasoningSelect.value = '';
   inputArea.append(previews, input, attachButton, fileInput, sendButton);
-  panel.append(inputArea, messages);
+  panel.append(inputArea, messages, reasoningSelect);
   document.body.appendChild(panel);
-  return { api, sandbox, document, AppState, StorageService, app, panel, previews, input, fileInput, sendButton, messages, toasts, drafts, files };
+  return { api, sandbox, document, AppState, StorageService, app, panel, previews, input, fileInput, sendButton, reasoningSelect, messages, toasts, drafts, files };
 }
 
 function question(id = 331) { return { id, stem: '题干', options: [], answer: 'A', explanation: '' }; }
@@ -984,4 +988,202 @@ test('请求体契约：images 为 dataURL 数组原样透传，整包校验按 
   assert.throws(() => context.api.AIService.assertBodySize({ images: ['A'.repeat(11 * 1024 * 1024)] }), /超过 10MiB 上限/);
   // 中文字符按 UTF-8 多字节计
   assert.equal(context.api.AIService.assertBodySize({ text: '汉'.repeat(3 * 1024 * 1024) }) > 9 * 1024 * 1024, true);
+});
+
+// vm 沙箱里构造的数组/对象原型与测试 realm 不同，deepStrictEqual 会因原型不同而失败；比较前先 JSON 归一。
+const plain = value => JSON.parse(JSON.stringify(value));
+
+test('临时会话：成功一轮后才把 user+assistant 作为 history 发送，reasoningPresetId 始终发送（空串=模型默认）', async () => {
+  const context = createContext();
+  const { asked } = mockChat(context);
+  useProfile(context, 'passed');
+  context.api.AIAttachments.bindPanel(context.panel, question());
+
+  context.input.value = '第一问';
+  await context.app.sendAIMessage();
+  assert.equal(asked.length, 1);
+  assert.deepEqual(plain(asked[0].history), [], '首轮没有上文，history 为空数组');
+  assert.equal(asked[0].reasoningPresetId, '', '档位框为空时按契约发送空串（模型默认），绝不省略该字段');
+
+  // 选择档位后仍只发档位 id，不发参数 JSON。
+  context.reasoningSelect.value = 'preset-deep';
+  context.input.value = '第二问';
+  await context.app.sendAIMessage();
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1].reasoningPresetId, 'preset-deep', '选中的档位以 id 发送');
+  assert.deepEqual(plain(asked[1].history), [
+    { role: 'user', content: '第一问' },
+    { role: 'assistant', content: '' },
+  ], '第二轮携带上一轮的 user+assistant 上下文');
+  assert.deepEqual(plain(await context.api.AIService.loadHistory(question())), [
+    { role: 'user', content: '第一问' },
+    { role: 'assistant', content: '' },
+    { role: 'user', content: '第二问' },
+    { role: 'assistant', content: '' },
+  ], '内存历史适配层按题返回当前会话，不从 server 恢复');
+});
+
+test('清空：clearAIChat 清空消息/附件/草稿，作废在途生成，迟到回复不回填', async () => {
+  const context = createContext();
+  // 清空会对当前 profile/题号调用 DELETE conversations；这里返回 ok，验证不因失败中断本地清理。
+  const deletes = [];
+  context.sandbox.fetch = async (url, options = {}) => {
+    if (options.method === 'DELETE') deletes.push(String(url));
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  };
+  let releaseFlight = null;
+  const asked = [];
+  context.api.AIService.questionImages = async () => [];
+  context.api.AIService.chatStream = payload => {
+    asked.push(payload);
+    return new Promise(resolve => { releaseFlight = () => resolve({ headers: { get: () => 'run-1' }, body: null }); });
+  };
+  useProfile(context, 'passed');
+  context.api.AIAttachments.bindPanel(context.panel, question());
+  await addFiles(context, [fakeFile({ name: '清空.png', type: 'image/png' })]);
+  context.input.value = '要被清空的提问';
+  const flight = context.app.sendAIMessage();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(asked.length, 1);
+  assert.equal(context.AppState.aiBusy, true);
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 2, '发送后消息区有用户气泡与回答占位');
+
+  await context.app.clearAIChat();
+  assert.equal(context.AppState.aiBusy, false, '清空后复位 busy');
+  assert.equal(context.api.AIAttachments.items.length, 0, '清空附件状态');
+  assert.equal(cards(context.previews).length, 0, '清空附件预览');
+  assert.equal(context.input.value, '', '清空草稿输入');
+  assert.equal(context.drafts.get('331'), '', '清空内存草稿');
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 0, '清空消息');
+  assert.ok(context.messages.querySelector('.ai-empty'), '消息区回到空状态');
+  assert.ok(deletes.some(url => /\/api\/ai\/conversations\/p1\/331$/.test(url)), '按当前 profile/题号清理遗留会话');
+
+  // 迟到回复到达：代次已变，不得回填消息，也不得把旧答案写入内存上下文。
+  releaseFlight();
+  await flight;
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 0, '迟到回复不得回填消息');
+  assert.deepEqual(plain(await context.api.AIService.loadHistory(question())), [], '迟到回复不得进入临时会话');
+  assert.equal(context.api.AIAttachments.items.length, 0, '迟到回复不得恢复附件');
+});
+
+test('清空：DELETE conversations 返回 500 时明确提示遗留清理失败，但本窗口消息仍清空', async () => {
+  const context = createContext();
+  const deletes = [];
+  context.sandbox.fetch = async (url, options = {}) => {
+    if (options.method === 'DELETE') { deletes.push(String(url)); return { ok: false, status: 500, json: async () => ({ error: '磁盘写失败' }) }; }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  useProfile(context, 'passed');
+  context.api.AIAttachments.bindPanel(context.panel, question());
+  context.api.AIService.rememberTurn(question(), '旧问', '旧答');
+  await context.api.AIViews.renderAIHistory(question());
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 2, '清空前有历史气泡');
+
+  await context.app.clearAIChat();
+  assert.ok(deletes.some(url => /\/api\/ai\/conversations\/p1\/331$/.test(url)));
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 0, '本窗口消息仍清空');
+  assert.ok(context.messages.querySelector('.ai-empty'), '仍回落空占位');
+  assert.ok(context.toasts.some(message => /HTTP 500/.test(message) && /清理失败/.test(message)), 'DELETE 500 必须显式提示，不能静默当成功');
+  assert.ok(context.toasts.some(message => /磁盘写失败/.test(message)), '提示里带上服务端错误信息');
+});
+
+test('缓存作用域：Q1 对话 -> 切 Q2 不发言 -> 切回 Q1 临时会话为空（切题即丢）', () => {
+  const context = createContext();
+  useProfile(context, 'passed');
+  context.api.AIService.rememberTurn(question(331), 'Q1 提问', 'Q1 回答');
+  assert.deepEqual(plain(context.api.AIService.historyFor(question(331))), [
+    { role: 'user', content: 'Q1 提问' },
+    { role: 'assistant', content: 'Q1 回答' },
+  ], '同题读取保留当前会话');
+  assert.deepEqual(plain(context.api.AIService.historyFor(question(999))), [], 'Q2 无上文');
+  assert.deepEqual(plain(context.api.AIService.historyFor(question(331))), [], '切回 Q1 不得复活旧上下文');
+  // 同题重复读取不应误清当前会话
+  context.api.AIService.rememberTurn(question(331), '再问', '再答');
+  assert.equal(plain(context.api.AIService.historyFor(question(331))).length, 2);
+  assert.equal(plain(context.api.AIService.historyFor(question(331))).length, 2, '同题重绘/重复读取不清空');
+});
+
+test('缓存作用域：切服务后历史为空且 DOM 渲染为空占位，不残留上一服务对话', async () => {
+  const context = createContext();
+  useProfile(context, 'passed');
+  context.AppState.aiProfiles = [
+    { id: 'p1', name: '服务A', capabilities: { text: true, vision: 'passed' } },
+    { id: 'p2', name: '服务B', capabilities: { text: true, vision: 'passed' } },
+  ];
+  context.AppState.aiProfileId = 'p1';
+  context.api.AIService.rememberTurn(question(331), 'A 服务提问', 'A 服务回答');
+  await context.api.AIViews.renderAIHistory(question(331));
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 2);
+
+  // 切换服务：历史与 DOM 都应清空（不能只 return 留旧内容）。
+  context.AppState.aiProfileId = 'p2';
+  await context.api.AIViews.renderAIHistory(question(331));
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 0, '换服务后 DOM 不含旧服务对话');
+  assert.ok(context.messages.querySelector('.ai-empty'), '换服务后渲染为空占位');
+  assert.deepEqual(plain(context.api.AIService.historyFor(question(331))), [], '换服务后历史为空');
+});
+
+test('清空竞态：旧流在 clear 后到达的 started/delta 不得改全局 runId 或回填', async () => {
+  const context = createContext();
+  context.sandbox.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+  let releaseRead = null;
+  context.api.AIService.questionImages = async () => [];
+  context.api.AIService.chatStream = async () => ({
+    headers: { get: () => '' },
+    body: {
+      getReader: () => ({
+        read: () => new Promise(resolve => {
+          releaseRead = () => resolve({
+            done: false,
+            value: new TextEncoder().encode(
+              'data: ' + JSON.stringify({ type: 'started', runId: 'late-run' }) + '\n\n' +
+              'data: ' + JSON.stringify({ type: 'delta', content: '迟到内容' }) + '\n\n',
+            ),
+          });
+        }),
+      }),
+    },
+  });
+  useProfile(context, 'passed');
+  context.api.AIAttachments.bindPanel(context.panel, question());
+  context.input.value = '生成中的提问';
+  const flight = context.app.sendAIMessage();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.ok(releaseRead, '已进入读取边界');
+  assert.equal(context.AppState.aiBusy, true);
+
+  await context.app.clearAIChat();
+  assert.equal(context.AppState.aiRunId, '', '清空后 runId 归零');
+
+  // 旧流迟到：reader 边界 epoch 复核，started/delta 都不生效。
+  releaseRead();
+  await flight;
+  assert.equal(context.AppState.aiRunId, '', '旧流迟到 started 不得覆盖全局 runId');
+  assert.equal(context.messages.querySelectorAll('.ai-message').length, 0, '迟到内容不得回填');
+  assert.equal(context.AppState.aiBusy, false, '旧 finally 不得破坏新状态');
+});
+
+test('档位选择：同服务刷新保留用户显式选择的「模型默认」空串，不被档案默认覆盖', () => {
+  const context = createContext();
+  context.AppState.aiProfiles = [
+    { id: 'p1', name: '服务A', reasoningPresets: [{ id: 'r1', name: '深度思考' }], defaultReasoningPresetId: 'r1', capabilities: { text: true, vision: 'passed' } },
+    { id: 'p2', name: '服务B', reasoningPresets: [{ id: 'r2', name: '快速' }], defaultReasoningPresetId: 'r2', capabilities: { text: true, vision: 'passed' } },
+  ];
+  context.AppState.aiProfileId = 'p1';
+  const select = context.reasoningSelect;
+  // 首次设置（新建 select、无归属）用档案默认。
+  context.api.AIController.syncReasoningPresets();
+  assert.equal(select.value, 'r1', '首次用档案默认档位');
+  // 用户明确选择「模型默认」空串：同服务刷新选项时不得被默认覆盖。
+  select.value = '';
+  context.api.AIController.syncReasoningPresets();
+  assert.equal(select.value, '', '同服务刷新必须保留显式空串（模型默认）');
+  // 档位被删：当前值无效则回档案默认。
+  select.value = 'gone';
+  context.api.AIController.syncReasoningPresets();
+  assert.equal(select.value, 'r1', '无效/被删档位回退到档案默认');
+  // 换服务用新服务默认。
+  context.AppState.aiProfileId = 'p2';
+  context.api.AIController.syncReasoningPresets();
+  assert.equal(select.value, 'r2', '换服务用新服务默认');
 });

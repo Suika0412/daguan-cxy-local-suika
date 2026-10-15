@@ -108,7 +108,7 @@ test("Service Worker 不预缓存首屏之外的大型索引和字体", () => {
   const version = sw.match(/daguan-shell-v(\d+)/)?.[1];
   assert.ok(version, 'Service Worker 使用版本化的缓存名');
   assert.ok(newApp.includes(`service-worker.js?v=${version}`));
-  assert.ok(app.includes("service-worker.js?v=165"));
+  assert.ok(app.includes(`service-worker.js?v=${version}`));
   assert.match(sw, /"\.\/legacy\.html"/);
   const legacyStyle = html.match(/href="(\.\/legacy\.css\?v=\d+)"/)?.[1];
   assert.ok(legacyStyle); assert.ok(sw.includes(JSON.stringify(legacyStyle)));

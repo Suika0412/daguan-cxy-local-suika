@@ -8,7 +8,6 @@ import { cipherTag, createSecretBackend, SECRET_FORMAT } from "./ai-secrets.mjs"
 
 const PROFILE_VERSION = 2;
 const MAX_PROFILES = 12;
-const MAX_HISTORY_MESSAGES = 400;
 const REQUEST_TIMEOUT_MS = 90_000;
 // Keys shorter than this reveal no characters at all in keyHint.
 const MIN_HINT_LENGTH = 16;
@@ -19,6 +18,24 @@ const MIN_HINT_LENGTH = 16;
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const IMAGE_DATA_URL = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/;
+// 思考档位（reasoningPresets）：预设多个自定义思考参数，聊天时按 id 选用。
+// Frozen preset contract: at most 12 presets, each with a unique printable-ASCII
+// id (1..64), a 1..40 char name, and a plain JSON-object `params` whose serialized
+// form stays within 8 KiB. `params` may nest whatever field the provider expects
+// (e.g. reasoning_effort / thinking / extra_body) — no hard-coded low/mid/high or
+// model enums here. Only request-shaping or credential/address keys are refused.
+const MAX_REASONING_PRESETS = 12;
+const MAX_PRESET_ID = 64;
+const MAX_PRESET_NAME = 40;
+const MAX_PRESET_PARAMS_BYTES = 8 * 1024;
+const PRESET_ID_PATTERN = /^[\x21-\x7e]{1,64}$/;
+const MAX_CHAT_HISTORY = 24;
+// Top-level params keys that would override the controlled request body, the auth
+// headers or the request address. Keys are compared case-insensitively.
+const FORBIDDEN_PRESET_KEYS = new Set(["model", "messages", "stream", "headers", "authorization", "apikey", "api_key", "key", "baseurl", "base_url", "url"]);
+// Never allowed as a key anywhere in the nested params structure: prototype
+// pollution via JSON input.
+const FORBIDDEN_PROTOTYPE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -38,6 +55,75 @@ function imageContractError(message) {
   const error = new Error(message);
   error.status = 400;
   return error;
+}
+
+// Client-input violations (invalid preset, invalid chat history) are explicit
+// HTTP 400 with a readable reason — never a silent drop or a 500 fallback.
+function clientError(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+// Validate a single preset's `params`: a plain JSON object (no array, null, or
+// scalar). Only the TOP level may not shadow the controlled request/auth/address
+// fields (model/messages/stream/headers/authorization/apiKey/api_key/key/
+// baseUrl/base_url/url); a nested payload such as extra_body.model is the
+// provider's own business and stays allowed. Prototype keys are refused at any
+// depth. The serialized form must fit in 8 KiB (measured in UTF-8 bytes, so a
+// multi-byte value that is short in characters but long in bytes is caught).
+// Returned verbatim so the chat body can map it 1:1 to the provider.
+function normalizePresetParams(value, id) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw clientError(`思考档位「${id}」的 params 必须是 JSON 对象`);
+  }
+  for (const key of Object.keys(value)) {
+    if (FORBIDDEN_PROTOTYPE_KEYS.has(key)) throw clientError(`思考档位「${id}」的 params 不能包含保留键「${key}」`);
+    if (FORBIDDEN_PRESET_KEYS.has(String(key).toLowerCase())) throw clientError(`思考档位「${id}」的 params 不能覆盖受控字段「${key}」`);
+  }
+  const stack = [value];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const key of Object.keys(current)) {
+      if (FORBIDDEN_PROTOTYPE_KEYS.has(key)) throw clientError(`思考档位「${id}」的 params 不能包含保留键「${key}」`);
+      const child = current[key];
+      if (child && typeof child === "object") stack.push(child);
+    }
+  }
+  let json;
+  try { json = JSON.stringify(value); } catch { throw clientError(`思考档位「${id}」的 params 无法序列化为 JSON`); }
+  if (Buffer.byteLength(json, "utf8") > MAX_PRESET_PARAMS_BYTES) throw clientError(`思考档位「${id}」的 params 超过 ${MAX_PRESET_PARAMS_BYTES} 字节上限`);
+  return value;
+}
+
+// Whole-array validation for a profile write. `undefined` means "field not sent"
+// and keeps the existing presets; any other non-array value is an explicit 400.
+// Invalid entries and duplicate ids are rejected, never silently dropped.
+function normalizeReasoningPresets(value, existing = {}) {
+  if (value === undefined) return Array.isArray(existing.reasoningPresets) ? existing.reasoningPresets : [];
+  if (!Array.isArray(value)) throw clientError("思考档位 reasoningPresets 必须是数组");
+  if (value.length > MAX_REASONING_PRESETS) throw clientError(`最多保存 ${MAX_REASONING_PRESETS} 个思考档位`);
+  const seen = new Set();
+  return value.map((raw, index) => {
+    const item = object(raw);
+    const id = typeof item.id === "string" ? item.id : "";
+    if (!PRESET_ID_PATTERN.test(id)) throw clientError(`第 ${index + 1} 个思考档位的 id 必须是不含空白的 1..${MAX_PRESET_ID} 位 ASCII 字符串`);
+    if (seen.has(id)) throw clientError(`思考档位 id 重复：${id}`);
+    seen.add(id);
+    const name = typeof item.name === "string" ? item.name.trim() : "";
+    if (!name || name.length > MAX_PRESET_NAME) throw clientError(`思考档位「${id}」的 name 必须是 1..${MAX_PRESET_NAME} 个字符`);
+    return { id, name, params: normalizePresetParams(item.params, id) };
+  });
+}
+
+// "" means "no extra params". A non-empty default must reference one of the
+// resulting presets, otherwise the write fails instead of leaving a dangling id.
+function normalizeDefaultReasoningPreset(value, existing = {}, presets) {
+  const raw = value === undefined ? (existing.defaultReasoningPresetId ?? "") : value;
+  const id = raw == null ? "" : String(raw);
+  if (id === "") return "";
+  if (!presets.some((preset) => preset.id === id)) throw clientError(`默认思考档位「${id}」不在该服务的档位列表中`);
+  return id;
 }
 
 // Validate `payload.images` against the frozen vision contract and return the
@@ -168,9 +254,48 @@ export function visibleAnswer(content) {
   return createAnswerFilter().push(safeText(content), true);
 }
 
-function visibleHistory(history) {
-  return { ...history, messages: (Array.isArray(history.messages) ? history.messages : []).map(item =>
-    item?.role === "assistant" ? { ...item, content: visibleAnswer(item.content) } : item) };
+// Client-supplied multi-turn context for one shot chat. The server keeps no
+// session, so the front-end passes prior turns. Reject anything that is not a
+// [{role:user|assistant, content:string}] array; system/tool turns and array
+// (multimodal) content are refused outright, and only the last 24 turns survive.
+function normalizeChatHistory(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw clientError("history 必须是消息数组");
+  const messages = value.map((raw, index) => {
+    const item = object(raw);
+    if (item.role !== "user" && item.role !== "assistant") throw clientError(`history 第 ${index + 1} 条消息的 role 只能是 user 或 assistant`);
+    if (typeof item.content !== "string") throw clientError(`history 第 ${index + 1} 条消息的 content 必须是字符串`);
+    return { role: item.role, content: safeText(item.content) };
+  });
+  return messages.slice(-MAX_CHAT_HISTORY);
+}
+
+// Pick the params for this request. Omitted id falls back to the profile's
+// default preset; an explicit "" means "no reasoning params". A non-empty id
+// must belong to the profile — a raw `params` in the chat payload is ignored.
+function resolveReasoningPreset(payload, profile) {
+  const raw = payload.reasoningPresetId;
+  const wanted = raw === undefined || raw === null ? (profile.defaultReasoningPresetId || "") : String(raw);
+  if (!wanted) return null;
+  const presets = Array.isArray(profile.reasoningPresets) ? profile.reasoningPresets : [];
+  const found = presets.find((preset) => preset.id === wanted);
+  if (!found) throw clientError(`思考档位「${wanted}」不属于当前 AI 服务，请在服务设置中重新选择`);
+  return found;
+}
+
+// Build the upstream body. model/messages/stream are always re-asserted after
+// merging preset params, so nested JSON can not take over the request shape.
+// With no preset the historical temperature 0.2 is kept; with a preset no
+// temperature is forced, letting the preset or the provider decide.
+function buildChatBody({ model, messages, stream, preset, temperature = 0.2 }) {
+  const body = { model, messages, stream };
+  if (preset) {
+    Object.assign(body, preset.params);
+    body.model = model; body.messages = messages; body.stream = stream;
+  } else {
+    body.temperature = temperature;
+  }
+  return body;
 }
 
 function authHeaders(profile) {
@@ -207,6 +332,8 @@ function publicProfile(profile) {
     hasKey: usable,
     keyStatus: status,
     capabilities: profile.capabilities || { text: false, vision: "unknown" },
+    reasoningPresets: Array.isArray(profile.reasoningPresets) ? profile.reasoningPresets : [],
+    defaultReasoningPresetId: typeof profile.defaultReasoningPresetId === "string" ? profile.defaultReasoningPresetId : "",
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   };
@@ -236,9 +363,12 @@ function normalizeProfile(value, existing = {}) {
     streaming: input.streaming == null ? existing.streaming !== false : input.streaming !== false,
     active: input.active == null ? existing.active === true : input.active === true,
     capabilities: normalizeCapabilities(input.capabilities, existing.capabilities),
+    reasoningPresets: normalizeReasoningPresets(input.reasoningPresets, existing),
+    defaultReasoningPresetId: "",
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  profile.defaultReasoningPresetId = normalizeDefaultReasoningPreset(input.defaultReasoningPresetId, existing, profile.reasoningPresets);
   return profile;
 }
 
@@ -385,7 +515,7 @@ export function createAiService({ store, secretBackend } = {}) {
 
   function parseProfile(item) {
     const source = object(item);
-    return {
+    const profile = {
       id: String(source.id || randomUUID()),
       name: safeText(source.name || "新 AI 服务", 80).trim() || "新 AI 服务",
       baseUrl: safeText(source.baseUrl || "", 500).trim(),
@@ -397,9 +527,16 @@ export function createAiService({ store, secretBackend } = {}) {
       keyHint: typeof source.keyHint === "string" ? source.keyHint : "",
       legacyKey: typeof source.key === "string" ? source.key : "",
       capabilities: normalizeCapabilities(source.capabilities),
+      reasoningPresets: normalizeReasoningPresets(source.reasoningPresets, {}),
+      defaultReasoningPresetId: "",
       createdAt: source.createdAt,
       updatedAt: source.updatedAt,
     };
+    // Stored presets go through the same strict validation as a write: an
+    // explicitly invalid new field is a real error, never a silent drop or a
+    // quietly cleared default. Old files without the field default to []/"".
+    profile.defaultReasoningPresetId = normalizeDefaultReasoningPreset(source.defaultReasoningPresetId, {}, profile.reasoningPresets);
+    return profile;
   }
 
   async function readDocument() {
@@ -439,6 +576,8 @@ export function createAiService({ store, secretBackend } = {}) {
       streaming: profile.streaming !== false,
       active: profile.active === true,
       capabilities: profile.capabilities || { text: false, vision: "unknown" },
+      reasoningPresets: Array.isArray(profile.reasoningPresets) ? profile.reasoningPresets : [],
+      defaultReasoningPresetId: typeof profile.defaultReasoningPresetId === "string" ? profile.defaultReasoningPresetId : "",
       createdAt: profile.createdAt,
       updatedAt: profile.updatedAt,
     };
@@ -769,10 +908,13 @@ export function createAiService({ store, secretBackend } = {}) {
     const user = kind === "vision"
       ? [{ type: "text", text: "请只回复：视觉测试通过" }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/5nR5WQAAAABJRU5ErkJggg==" } }]
       : "请只回复：文本测试通过";
+    // Probe with the profile's default reasoning preset so the test matches the
+    // chat configuration. No provider-specific adaptation or live model probing.
+    const preset = resolveReasoningPreset({ reasoningPresetId: undefined }, profile);
     const response = await fetchWithTimeout(endpoint(profile.baseUrl, "chat/completions"), {
       method: "POST",
       headers: authHeaders(profile),
-      body: JSON.stringify({ model: profile.model, messages: [{ role: "user", content: user }], stream: false, temperature: 0 }),
+      body: JSON.stringify(buildChatBody({ model: profile.model, messages: [{ role: "user", content: user }], stream: false, preset, temperature: 0 })),
     });
     const text = await response.text();
     if (!response.ok) throw upstreamError("模型测试失败", response.status);
@@ -811,10 +953,10 @@ export function createAiService({ store, secretBackend } = {}) {
     if (res.writableEnded || res.destroyed) return;
     if (runs.size >= 2) throw new Error("当前已有两个 AI 任务在生成，请稍后再试");
     const profile = await getProfile(payload.profileId);
-    const questionId = String(object(payload.question).id || "unknown");
-    const key = `${profileKey(profile.id)}--${profileKey(questionId)}`;
-    const history = visibleHistory(object(await store.readAiHistory(key)));
-    const historyMessages = Array.isArray(history.messages) ? history.messages.filter((item) => item && (item.role === "user" || item.role === "assistant")).slice(-24) : [];
+    // No server-side session: multi-turn context is whatever the client passes
+    // in `payload.history`, validated and bounded. Nothing is written to disk.
+    const historyMessages = normalizeChatHistory(payload.history);
+    const preset = resolveReasoningPreset(payload, profile);
     const prompt = safeText(payload.prompt || "请讲解这道题。", 20_000);
     const userMessage = `${contextText(payload.question, payload.includePrivate === true)}\n\n本次请求：${prompt}`;
     const messages = [
@@ -843,7 +985,7 @@ export function createAiService({ store, secretBackend } = {}) {
       const upstream = await fetch(endpoint(profile.baseUrl, "chat/completions"), {
         method: "POST",
         headers: { ...authHeaders(profile), Accept: "text/event-stream, application/json" },
-        body: JSON.stringify({ model: profile.model, messages, stream: profile.streaming !== false, temperature: 0.2 }),
+        body: JSON.stringify(buildChatBody({ model: profile.model, messages, stream: profile.streaming !== false, preset })),
         signal: controller.signal,
         redirect: "error",
       });
@@ -889,8 +1031,7 @@ export function createAiService({ store, secretBackend } = {}) {
       }
       if (controller.signal.aborted) throw controller.signal.reason;
       if (!answer.trim()) throw new Error("AI 服务未返回正式答案，请检查模型或重试");
-      const nextMessages = [...(Array.isArray(history.messages) ? history.messages : []), { role: "user", content: userMessage, at: new Date().toISOString() }, { role: "assistant", content: answer, at: new Date().toISOString() }].slice(-MAX_HISTORY_MESSAGES);
-      await store.writeAiHistory(key, { version: 1, profileId: profile.id, questionId, messages: nextMessages, updatedAt: new Date().toISOString() });
+      // No persistence: the successful answer is only streamed back, never saved.
       writeSse(res, { type: "done", runId, message: { role: "assistant", content: answer } });
     } catch (error) {
       writeSse(res, { type: "error", runId, error: error?.name === "AbortError" ? "AI 请求已停止" : safeText(error?.message || error, 500) });
@@ -905,9 +1046,11 @@ export function createAiService({ store, secretBackend } = {}) {
     }
   }
 
+  // One-shot answers with no persistent session: the conversation endpoint keeps
+  // its original shape but never reloads old on-disk history. Any legacy file
+  // left on disk is only removed via clearConversation (below).
   async function conversation(profileId, questionId) {
-    const key = `${profileKey(profileId)}--${profileKey(questionId)}`;
-    return visibleHistory(object(await store.readAiHistory(key)));
+    return { messages: [], ephemeral: true };
   }
 
   async function clearConversation(profileId, questionId) {

@@ -55,6 +55,25 @@ function writeProgressStorage(progress, favorites) {
 const PendingSync = typeof window !== 'undefined' ? window.DaguanPendingSync || null : null;
 const ANNOTATION_KEY_SHARED = 'daguan_question_annotations_v1';
 
+// AI 草稿只保留当前页面的临时槽位：不进 localStorage/sessionStorage，刷新即丢，符合“聊天临时一次性”。
+// 读取/写入/清空前顺手移除同一题的旧草稿键（共享键与更早的 daguan_ai_draft_<id>），
+// 防止旧数据在新界面“复活”；不扫描、不删除其它 localStorage 键。
+let aiDraftSlot = { questionId: '', content: '' };
+function legacyDraftKey(questionId) {
+    return (window.DaguanVersions && window.DaguanVersions.draftKey) ? window.DaguanVersions.draftKey(questionId) : `daguan_ai_draft_v1:${questionId}`;
+}
+function cleanLegacyDraftKeys(questionId) {
+    const id = String(questionId ?? '');
+    if (!id) return;
+    for (const key of [legacyDraftKey(id), `daguan_ai_draft_${id}`]) {
+        try { localStorage.removeItem(key); }
+        catch (error) {
+            // 失败必须显式上报（受限存储等），但只说明旧缓存键清理失败与“本轮仍只用内存”，不输出草稿内容/Key。
+            if (typeof console !== 'undefined') console.warn(`清理旧 AI 草稿缓存失败（${key}）：本轮草稿只保存在页面内存，不落盘。`, error && error.message ? error.message : error);
+        }
+    }
+}
+
 function readPendingSync() {
     const empty = { version: 1, annotations: {}, questions: {} };
     if (!PendingSync) return empty;
@@ -332,37 +351,24 @@ class StorageService {
         return prefs;
     }
 
+    // AI 草稿是当前页面的临时内存：切题即丢，也不跨刷新恢复。读/写/清空前清理同一题旧键防复活。
     static getAIDraft(questionId) {
-        const key = (window.DaguanVersions && window.DaguanVersions.draftKey) ? window.DaguanVersions.draftKey(questionId) : `daguan_ai_draft_v1:${questionId}`;
-        return localStorage.getItem(key) || '';
+        const id = String(questionId ?? '');
+        cleanLegacyDraftKeys(id);
+        if (aiDraftSlot.questionId !== id) aiDraftSlot = { questionId: id, content: '' };
+        return aiDraftSlot.content;
     }
 
     static saveAIDraft(questionId, content) {
-        const key = (window.DaguanVersions && window.DaguanVersions.draftKey) ? window.DaguanVersions.draftKey(questionId) : `daguan_ai_draft_v1:${questionId}`;
-        if (content) {
-            localStorage.setItem(key, content);
-        } else {
-            localStorage.removeItem(key);
-        }
+        const id = String(questionId ?? '');
+        cleanLegacyDraftKeys(id);
+        aiDraftSlot = { questionId: id, content: String(content ?? '') };
     }
 
-    // 新版旧键（daguan_ai_draft_<id>、daguan_ui_appearance_new）迁移到共享模块的键。
-    // 只填空白目标键、不覆盖已有偏好；可重复执行。
+    // 旧版外观键（daguan_ui_appearance_new）迁移到共享模块的键；只填空白目标键、不覆盖已有偏好，可重复执行。
+    // AI 草稿已改为页面内存，不再迁移/落盘。
     static migrateLegacyKeys() {
         let migrated = 0;
-        try {
-            const draftPrefix = (window.DaguanVersions && window.DaguanVersions.draftKey) ? window.DaguanVersions.draftKey('') : 'daguan_ai_draft_v1:';
-            for (let i = localStorage.length - 1; i >= 0; i--) {
-                const key = localStorage.key(i);
-                const match = /^daguan_ai_draft_(.+)$/.exec(key || '');
-                if (!match || match[1].startsWith('v1:')) continue;
-                const target = `${draftPrefix}${match[1]}`;
-                if (localStorage.getItem(target) == null) {
-                    localStorage.setItem(target, localStorage.getItem(key));
-                    migrated += 1;
-                }
-            }
-        } catch {}
         try {
             const appearanceKey = (window.DaguanVersions && window.DaguanVersions.appearanceKey) || 'daguan_ui_appearance_new_v1';
             const current = localStorage.getItem(appearanceKey);

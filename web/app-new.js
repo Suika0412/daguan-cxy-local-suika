@@ -5,7 +5,7 @@
 
 // ========== 离线缓存注册（与 app2.js 一致） ==========
 if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=167").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=168").catch(() => {});
 }
 
 // ========== 全局状态 ==========
@@ -4315,7 +4315,7 @@ document.getElementById('btn-dl').addEventListener('click', function () {
             busy: () => AppState.aiBusy,
             allowed: () => PreviewAccess.privateAllowed(),
             select: id => this.selectAIProfile(id),
-            changed: profiles => { AppState.aiProfiles = profiles; if (!profiles.some(p => p.id === AppState.aiProfileId)) AIService.selectProfile(profiles[0]?.id || ''); },
+            changed: profiles => { AppState.aiProfiles = profiles; if (!profiles.some(p => p.id === AppState.aiProfileId)) AIService.selectProfile(profiles[0]?.id || ''); AIController.syncReasoningPresets(); },
         });
     }
 
@@ -4764,6 +4764,7 @@ document.getElementById('btn-dl').addEventListener('click', function () {
     static abortAIStream(...args) { return AIController.abortAIStream.apply(this, args); }
     static sendAIMessage(...args) { return AIController.sendAIMessage.apply(this, args); }
     static retryAIMessage(...args) { return AIController.retryAIMessage.apply(this, args); }
+    static clearAIChat(...args) { return AIController.clearAIChat.apply(this, args); }
 
     static switchAnnotationTab(tab) {
         const tabs = document.querySelectorAll('.annotation-tab');

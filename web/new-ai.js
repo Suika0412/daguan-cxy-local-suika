@@ -1,6 +1,8 @@
 (function(root) {
 "use strict";
 root.DaguanNewAI = { create({ window, document, fetch, location, AppState, StorageService, assetUrl, escapeHtml, renderMarkdown, toast, getAccess, getRenderer, getApp }) {
+// 会话代次：清空/切服务时 +1，作废在途生成，迟到响应与旧 finally 不得回填，也不得释放新运行的 busy。
+let aiChatEpoch = 0;
 const AI_COMPOSE_PROMPTS = {
     brief: '请简短回答：先用一句话给出核心结论，再用 2～4 句话说明最关键的一步是怎么来的。只保留考研解题真正需要的内容，不展开完整推导、不重复题干；公式只留最关键的一个，较长公式单独成行。最后可以用一句话点出这道题在考研里属于哪类常考题型。',
     detailed: '请详细回答这道题，按考研复习的标准展开：## 答案、## 考研视角、## 详细推导、## 得分点与易错点。其中「考研视角」要说明这道题在考研大纲里对应什么知识点、要求到什么层次（了解／理解／掌握）、属于哪类常考题型、卷面上是选择/填空还是解答题以及大致分值。「详细推导」中每一步都要说明本步目标、知识点及其具体定义或公式、适用条件、从题干或前一步哪条信息想到该方法、推导过程与结果。清楚区分题干直接信息、前一步推出的结论和官方解析提供的信息，不能把题干没有给出的信息说成已知。数学公式使用 LaTeX，较长公式单独成行。',
@@ -16,6 +18,10 @@ const AI_IMAGE_LIMIT = 4;
 const AI_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 const AI_REQUEST_MAX_BYTES = 10 * 1024 * 1024;
 const AI_IMAGE_ONLY_PROMPT = '请结合图片回答我的问题。';
+// 临时会话：history 只存在于当前页面内存，成功完成一轮才追加；发送上下文最多 24 条，面板最多保留 400 条。
+const AI_HISTORY_CONTEXT_MAX = 24;
+const AI_HISTORY_STORE_MAX = 400;
+const AI_REASONING_DEFAULT_LABEL = '模型默认（不附加参数）';
 
 function utf8ByteLength(text) {
     return new TextEncoder().encode(String(text ?? '')).length;
@@ -274,15 +280,22 @@ class AIService {
         StorageService.saveAIPreference('profileId', AppState.aiProfileId);
     }
 
-    // 服务端固定 system 指令负责数学教学约束；客户端只送 prompt + 题目载荷。
-    static chatBody({ question, prompt, includePrivate = false, images = [] }) {
-        return {
+    // 服务端固定 system 指令负责数学教学约束；客户端只送 prompt + 题目载荷 + 当前页面临时 history。
+    static chatBody({ question, prompt, includePrivate = false, images = [], history = [], reasoningPresetId }) {
+        const body = {
             profileId: AppState.aiProfileId,
             question: this.questionPayload(question),
             prompt: String(prompt || ''),
             includePrivate: includePrivate === true,
             images: Array.isArray(images) ? images : [],
         };
+        // history 只保留 user/assistant 文本：仅当前页面内存，成功一轮才追加。空数组也照常传出。
+        body.history = (Array.isArray(history) ? history : [])
+            .filter(message => message && (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string')
+            .map(message => ({ role: message.role, content: message.content }));
+        // 只发送已保存档位的 id；参数 JSON 永不由浏览器原样发到聊天。空串代表模型默认。
+        if (typeof reasoningPresetId === 'string') body.reasoningPresetId = reasoningPresetId;
+        return body;
     }
 
     // 请求体上限与本地中控台一致：整个 JSON 的 UTF-8 字节数不得超过 10MiB。
@@ -294,9 +307,9 @@ class AIService {
         return size;
     }
 
-    static async chatStream({ question, prompt, includePrivate = false, images = [], signal }) {
+    static async chatStream({ question, prompt, includePrivate = false, images = [], history = [], reasoningPresetId, signal }) {
         if (!AppState.aiProfileId) throw new Error('请先在设置中选择或配置 AI 服务');
-        const body = this.chatBody({ question, prompt, includePrivate, images });
+        const body = this.chatBody({ question, prompt, includePrivate, images, history, reasoningPresetId });
         const response = await fetch('./api/ai/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -356,15 +369,50 @@ class AIService {
         return out;
     }
 
-    // 按题隔离的聊天历史（保存在本地中控台，按 profile+question 分键）
+    // 临时会话：只存在于当前页面内存，按 profile+question 归组，切题/切服务/清空即丢，刷新不恢复。
+    // 成功完成一轮才追加 user prompt + 正式 assistant 答案；不从 server 读取或恢复。
+    static _session = { profileId: '', questionId: '', messages: [] };
+
+    static _sessionId(question) {
+        const id = question?.id;
+        return id == null ? '' : String(id);
+    }
+
+    // 内存读取适配层：保留旧方法名，UI 历史渲染改从这里取（测试仍可覆写本方法注入 fixture）。
     static async loadHistory(question) {
-        if (!question || !AppState.aiProfileId) return [];
-        try {
-            const response = await fetch(`./api/ai/conversations/${encodeURIComponent(AppState.aiProfileId)}/${encodeURIComponent(String(question.id))}`, { cache: 'no-store' });
-            if (!response.ok) return [];
-            const data = await response.json();
-            return Array.isArray(data.messages) ? data.messages.filter(m => m && (m.role === 'user' || m.role === 'assistant')) : [];
-        } catch { return []; }
+        return this.historyFor(question);
+    }
+
+    static historyFor(question) {
+        const qid = this._sessionId(question);
+        if (!qid) return [];
+        // 实际作用域变化（切题/切服务）即丢上一段临时会话并切到新空槽：同题重绘不受影响，
+        // 也保证 Q1→Q2（不发言）→Q1 不会让 Q1 的旧上下文复活。
+        if (this._session.questionId !== qid || this._session.profileId !== AppState.aiProfileId) {
+            this._session = { profileId: AppState.aiProfileId, questionId: qid, messages: [] };
+        }
+        return this._session.messages.map(message => ({ role: message.role, content: message.content }));
+    }
+
+    // 发送上下文：仅取最近 24 条；超过面板上限时从头部裁剪。
+    static contextHistory(question) {
+        return this.historyFor(question).slice(-AI_HISTORY_CONTEXT_MAX);
+    }
+
+    static rememberTurn(question, userContent, assistantContent) {
+        const qid = this._sessionId(question);
+        if (!qid || !AppState.aiProfileId) return;
+        if (this._session.questionId !== qid || this._session.profileId !== AppState.aiProfileId) {
+            this._session = { profileId: AppState.aiProfileId, questionId: qid, messages: [] };
+        }
+        const messages = this._session.messages;
+        messages.push({ role: 'user', content: String(userContent ?? '') });
+        messages.push({ role: 'assistant', content: String(assistantContent ?? '') });
+        if (messages.length > AI_HISTORY_STORE_MAX) messages.splice(0, messages.length - AI_HISTORY_STORE_MAX);
+    }
+
+    static resetSession() {
+        this._session = { profileId: '', questionId: '', messages: [] };
     }
 }
 
@@ -405,6 +453,7 @@ class AIViews {
             <div class="ai-header">
                 <h3>AI 辅助</h3>
                 <div class="ai-header-actions">
+                <button type="button" class="btn btn-text btn-sm" id="ai-clear-btn" onclick="App.clearAIChat()" aria-label="清空当前临时对话">清空</button>
                 <button type="button" class="btn btn-text btn-sm" id="ai-expand-btn" aria-pressed="false">展开</button>
                 <button type="button" class="btn btn-text btn-sm" id="ai-settings-btn" aria-expanded="false" aria-controls="ai-panel-settings">设置</button>
                 <button class="btn btn-icon btn-text" onclick="App.toggleAI()" aria-label="关闭 AI 面板">
@@ -417,6 +466,11 @@ class AIViews {
                 <label for="ai-profile-select-new">服务</label>
                 <select data-ai-service-control="true" id="ai-profile-select-new" onchange="App.selectAIProfile(this.value)">${profileOptions}</select>
                 <button type="button" class="btn btn-text btn-sm" onclick="App.navigate('settings')">设置</button>
+            </div>
+
+            <div class="ai-reasoning-row">
+                <label for="ai-reasoning-preset-new">思考档位</label>
+                <select data-ai-service-control="true" id="ai-reasoning-preset-new" aria-label="思考档位"></select>
             </div>
 
             <label class="ai-streaming-control"><input type="checkbox" id="ai-streaming-new"> 流式回答</label>
@@ -464,6 +518,8 @@ class AIViews {
             changed: profile => { Object.assign(AIService.activeProfile() || {}, profile); },
         });
         document.getElementById('ai-profile-select-new').disabled = AppState.aiBusy;
+        // 思考档位选项来自当前档案的自定义档位（含「模型默认」空项），初始选档案默认档位。
+        AIController.syncReasoningPresets();
         const input = document.getElementById('ai-input');
         if (input) {
             input.addEventListener('input', () => {
@@ -481,13 +537,19 @@ class AIViews {
     static async renderAIHistory(question) {
         const messagesEl = document.getElementById('ai-messages');
         if (!messagesEl || !question) return;
+        const epoch = aiChatEpoch;
         const profileId = AppState.aiProfileId;
         const history = await AIService.loadHistory(question);
-        // 用户可能已切题，历史回来时校验仍是当前题
+        // 用户可能已切题/切服务/清空，历史回来时复核：仍是同一题、同一服务、同一面板、未被清空作废。
         const current = AppState.questions[AppState.currentQuestionIndex];
-        if (!current || String(current.id) !== String(question.id) || profileId !== AppState.aiProfileId ||
+        if (epoch !== aiChatEpoch || !current || String(current.id) !== String(question.id) || profileId !== AppState.aiProfileId ||
             messagesEl !== document.getElementById('ai-messages') || AppState.aiBusy) return;
-        if (!history.length) return;
+        // 空历史也在有效作用域下渲染为空占位：换服务后必须清掉上一服务的 DOM 对话，不能只 return 留旧内容。
+        if (!history.length) {
+            messagesEl.innerHTML = '<div class="ai-empty"><strong>先问一个问题</strong><p>题目上下文已经准备好，选择上方提示或直接输入你的疑问。</p></div>';
+            window.DaguanAIReading?.refreshSections();
+            return;
+        }
         messagesEl.innerHTML = '';
         for (const message of history) {
             const msg = document.createElement('div');
@@ -510,11 +572,81 @@ class AIController {
 
     static selectAIProfile(profileId) {
         if (AppState.aiBusy) return;
+        const previous = AppState.aiProfileId;
         AIService.selectProfile(profileId);
         const stream = document.getElementById('ai-streaming-new');
         if (stream) stream.checked = AIService.activeProfile()?.streaming !== false;
+        // 档位选项按新服务重建；只在真正切换服务时丢弃临时会话与草稿（保存同服务不清空）。
+        AIController.syncReasoningPresets();
         const question = AppState.questions[AppState.currentQuestionIndex];
+        if (String(previous || '') !== String(profileId || '')) {
+            AIService.resetSession();
+            if (question) {
+                StorageService.saveAIDraft(question.id, '');
+                const input = document.getElementById('ai-input');
+                if (input) input.value = '';
+            }
+        }
         if (question) getRenderer().renderAIHistory(question);
+    }
+
+    // 思考档位选项：当前档案的自定义档位 + 空「模型默认」。首次/换服务用档案默认；
+    // 同一服务内保留本窗口手选的仍有效值（档位被删或已换服务则回默认）。选择只在本窗口生效。
+    static syncReasoningPresets() {
+        const select = document.getElementById('ai-reasoning-preset-new');
+        if (!select) return;
+        const profile = AIService.activeProfile();
+        const profileId = String(profile?.id || '');
+        const presets = Array.isArray(profile?.reasoningPresets) ? profile.reasoningPresets : [];
+        const defaults = String(profile?.defaultReasoningPresetId || '');
+        const previous = String(select.value || '');
+        // 同 profile 且当前选择仍有效时保留：空串代表用户显式选择「模型默认」，同样要保留；
+        // 档位被删或换了 profile 才回档案默认；首次设置（无归属）用档案默认。
+        const keepValid = select.dataset.profileId === profileId && (previous === '' || presets.some(item => String(item.id) === previous));
+        select.dataset.profileId = profileId;
+        select.innerHTML = [`<option value="">${escapeHtml(AI_REASONING_DEFAULT_LABEL)}</option>`]
+            .concat(presets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`)).join('');
+        select.value = keepValid ? previous : (presets.some(item => String(item.id) === defaults) ? defaults : '');
+    }
+
+    // 清空当前临时对话：不 confirm、不归档；生成中也可点。先作废本次生成，再清消息/内存/草稿/附件。
+    static async clearAIChat() {
+        const panel = document.getElementById('ai-panel');
+        const question = AppState.questions[AppState.currentQuestionIndex];
+        // 1) 作废在途生成：epoch+1 + abort 自己的流 + 停服务端运行。迟到响应与旧 finally 不得回填/释放新 busy。
+        aiChatEpoch += 1;
+        const controller = AppState.aiAbort;
+        if (controller) { try { controller.abort(); } catch {} }
+        if (AppState.aiRunId) AIService.stopRun(AppState.aiRunId);
+        AppState.aiAbort = null;
+        AppState.aiRunId = '';
+        AppState.aiBusy = false;
+        this.aiBusyUi(false);
+        // 2) 清消息、内存上下文、草稿、附件、阅读位置（仅当前窗口，不影响其它窗口）。
+        const messagesEl = document.getElementById('ai-messages');
+        if (messagesEl) messagesEl.innerHTML = '<div class="ai-empty"><strong>先问一个问题</strong><p>题目上下文已经准备好，选择上方提示或直接输入你的疑问。</p></div>';
+        AIService.resetSession();
+        if (question) {
+            StorageService.saveAIDraft(question.id, '');
+            const input = panel?.querySelector?.('#ai-input');
+            if (input) input.value = '';
+        }
+        AIAttachmentsState.reset();
+        window.DaguanAIReading?.refreshSections?.();
+        window.DaguanAIReading?.toLatest?.();
+        window.DaguanAIReading?.fitInput?.();
+        // 3) 清理当前 profile/题目的遗留会话文件；本窗口内存已清空，但遗留文件清理失败必须显式提示，不能静默。
+        if (AppState.aiProfileId && question) {
+            try {
+                const response = await fetch(`./api/ai/conversations/${encodeURIComponent(AppState.aiProfileId)}/${encodeURIComponent(String(question.id))}`, { method: 'DELETE' });
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    toast(`本窗口对话已清空，但遗留会话文件清理失败（HTTP ${response.status}）：${data.error || '请稍后重试'}`);
+                }
+            } catch (error) {
+                toast(`本窗口对话已清空，但遗留会话文件未能清理：${error.message || '本地服务未响应'}`);
+            }
+        }
     }
 
     static aiBusyUi(busy) {
@@ -567,6 +699,11 @@ class AIController {
         const prompt = content || (images.length ? AI_IMAGE_ONLY_PROMPT : '');
         if (!question || !prompt) return;
         const questionId = String(question.id);
+        // 本次会话代次与上下文：清空/切服务会 +1 改代次，迟到响应不再回填。
+        const epoch = aiChatEpoch;
+        const history = AIService.contextHistory(question);
+        const presetSelect = document.getElementById('ai-reasoning-preset-new');
+        const reasoningPresetId = presetSelect ? String(presetSelect.value ?? '') : undefined;
 
         // 发送生命周期从准备阶段开始：首个 await 之前就用现有 busy/controller 锁定本次发送，
         // 这样双击不会再并发准备，切题/停止也能中止准备本身。
@@ -582,8 +719,9 @@ class AIController {
                 this.aiBusyUi(false);
             }
         };
-        // 准备完成、真正操作 DOM 之前必须复核：未被中止、仍是同一题、仍是有效面板。
+        // 准备完成、真正操作 DOM 之前必须复核：未被中止、仍是同一题、仍是有效面板、未被清空改代次。
         const stillCurrent = () => !controller.signal.aborted
+            && epoch === aiChatEpoch
             && String(AppState.questions[AppState.currentQuestionIndex]?.id) === questionId
             && document.getElementById('ai-panel') === panel
             && AIController.liveInput(panel) !== null;
@@ -625,6 +763,8 @@ class AIController {
                 prompt,
                 includePrivate: document.getElementById('ai-include-private-new')?.checked === true,
                 images,
+                history,
+                reasoningPresetId,
             }));
         } catch (error) {
             releaseBusy();
@@ -665,13 +805,16 @@ class AIController {
         let recoverOnFailure = false;
         try {
             const includePrivate = document.getElementById('ai-include-private-new')?.checked === true;
-            const response = await AIService.chatStream({ question, prompt, includePrivate, images, signal: controller.signal });
+            const response = await AIService.chatStream({ question, prompt, includePrivate, images, history, reasoningPresetId, signal: controller.signal });
+            // 异步边界复核：清空/切服务后迟到响应不得写全局 runId，也不得继续 paint。
+            if (!stillCurrent()) { releaseBusy(); return; }
             AppState.aiRunId = response.headers.get('X-Daguan-Run-Id') || '';
             const reader = response.body?.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
             const paint = () => {
                 paintTimer = 0;
+                if (epoch !== aiChatEpoch) return;
                 if (!responseEl || !responseEl.isConnected) return;
                 const paintContent = () => { responseEl.textContent = answer || '正在思考…'; };
                 if (window.DaguanAIReading) window.DaguanAIReading.paintMessages(responseEl.closest('.ai-panel'), paintContent);
@@ -679,17 +822,21 @@ class AIController {
             };
             while (reader) {
                 const { done, value } = await reader.read();
+                // 读块边界复核：作废后立即停止消费，旧流不得再改 runId/answer。
+                if (epoch !== aiChatEpoch) return;
                 if (done) break;
                 buffer += decoder.decode(value, { stream: true });
                 const parsed = AIService.parseSseChunk('', buffer);
                 buffer = parsed.rest;
                 for (const evt of parsed.events) {
-                    if (evt.type === 'started' && evt.runId) AppState.aiRunId = evt.runId;
+                    if (evt.type === 'started' && evt.runId && epoch === aiChatEpoch) AppState.aiRunId = evt.runId;
                     if (evt.type === 'delta') { answer += evt.content || ''; if (!paintTimer) paintTimer = setTimeout(paint, 120); }
                     if (evt.type === 'error') throw new Error(evt.error || 'AI 生成失败');
                 }
             }
             if (paintTimer) clearTimeout(paintTimer);
+            // 已被清空/切服务作废（代次变化）：迟到结果不得回填，也不进入临时会话。
+            if (epoch !== aiChatEpoch) return;
             if (String(AppState.questions[AppState.currentQuestionIndex]?.id) !== questionId) return;
             if (responseEl) {
                 responseEl.removeAttribute('id');
@@ -698,8 +845,11 @@ class AIController {
                 else finish();
                 window.DaguanAIReading?.refreshSections();
             }
+            // 成功完成一轮才把 user prompt + 正式 assistant 答案加入当前页面临时会话。
+            AIService.rememberTurn(question, prompt, answer);
         } catch (error) {
             if (paintTimer) clearTimeout(paintTimer);
+            if (epoch !== aiChatEpoch) return;
             if (String(AppState.questions[AppState.currentQuestionIndex]?.id) !== questionId) return;
             const aborted = error?.name === 'AbortError';
             if (responseEl) {
@@ -730,15 +880,18 @@ class AIController {
             }
         } finally {
             if (paintTimer) clearTimeout(paintTimer);
-            window.DaguanAIReading?.refreshSections();
-            releaseBusy();
-            // busy 已复位：非中止失败且用户没另写草稿/加新图时，自动把本次图文快照放回输入区。
-            if (recoverOnFailure) {
-                AIController.restoreFailedSnapshot({
-                    questionId, panel,
-                    snapshot: questionSnapshot,
-                    currentQuestion: AppState.questions[AppState.currentQuestionIndex],
-                });
+            // 代次已变（清空/切服务）：旧 finally 不得释放接手的新运行 busy，也不得恢复旧快照。
+            if (epoch === aiChatEpoch) {
+                window.DaguanAIReading?.refreshSections();
+                releaseBusy();
+                // busy 已复位：非中止失败且用户没另写草稿/加新图时，自动把本次图文快照放回输入区。
+                if (recoverOnFailure) {
+                    AIController.restoreFailedSnapshot({
+                        questionId, panel,
+                        snapshot: questionSnapshot,
+                        currentQuestion: AppState.questions[AppState.currentQuestionIndex],
+                    });
+                }
             }
         }
     }

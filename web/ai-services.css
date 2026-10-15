@@ -17,4 +17,18 @@
 .ai-services [data-key-status] { color:var(--text-secondary, #6b6257); }
 .ai-services [data-key-status][data-tone="warn"] { color:#9c251e; font-weight:600; }
 .ai-streaming-control { display:flex; align-items:center; gap:6px; padding:6px 20px; font-size:13px; }
-@media(max-width:672px) { .ai-service-item { align-items:flex-start; flex-direction:column; } .ai-services-fields { grid-template-columns:minmax(0,1fr); } }
+/* 自定义推理档位：与普通字段区分，textarea 允许换行填写不同 provider 的参数对象。 */
+.ai-reasoning-presets { margin-top:16px; display:flex; flex-direction:column; gap:10px; }
+.ai-reasoning-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.ai-reasoning-hint { margin:0; font-size:12px; line-height:1.6; color:var(--text-secondary, #6b6257); }
+.ai-reasoning-hint code { font-size:12px; }
+.ai-reasoning-preset { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,2fr) auto; gap:10px; align-items:start; padding:10px 0; border-top:1px solid var(--border-default, var(--color-border, #ddd)); }
+.ai-reasoning-preset label { display:flex; flex-direction:column; gap:6px; font-size:13px; }
+.ai-reasoning-preset input, .ai-reasoning-preset textarea { width:100%; min-width:0; padding:8px; border:1px solid var(--border-default,var(--color-border,#ddd)); border-radius:7px; background:var(--bg-surface,var(--color-surface,#fff)); color:inherit; font:inherit; }
+.ai-reasoning-preset textarea { resize:vertical; }
+.ai-reasoning-default { display:flex; flex-direction:column; gap:6px; font-size:14px; }
+.ai-reasoning-default select { padding:8px; border:1px solid var(--border-default,var(--color-border,#ddd)); border-radius:7px; background:var(--bg-surface,var(--color-surface,#fff)); color:inherit; font:inherit; }
+.ai-reasoning-row { display:flex; align-items:center; gap:8px; padding:6px 20px; font-size:13px; }
+.ai-reasoning-row select { flex:1; min-width:0; }
+.ai-drawer-head-actions { display:flex; align-items:center; gap:8px; }
+@media(max-width:672px) { .ai-service-item { align-items:flex-start; flex-direction:column; } .ai-services-fields { grid-template-columns:minmax(0,1fr); } .ai-reasoning-preset { grid-template-columns:minmax(0,1fr); } }

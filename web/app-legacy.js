@@ -2,7 +2,7 @@
   "use strict";
 
   if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=165").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=168").catch(() => {});
   }
 
   const DATA = "./data";
@@ -653,9 +653,14 @@
   let noteSaveInFlight = null;
   let noteSaveError = null;
   let noteDirty = false;
+  // 当前页面临时会话/草稿槽位（内存 only）。
+  let aiMemoryDraft = { questionId: null, content: "" };
+  let aiMemoryHistory = { questionId: null, profileId: "", messages: [] };
   function saveAiDraft() {
-    if (state.aiQuestionId && els.aiPrompt && previewPrivateAllowed(false)) {
-      localStorage.setItem(window.DaguanVersions.draftKey(state.aiQuestionId), els.aiPrompt.value);
+    if (state.aiQuestionId != null && els.aiPrompt) {
+      // AI 草稿只保存在当前页面内存：不写 localStorage/sessionStorage，刷新即丢。
+      aiMemoryDraft = { questionId: String(state.aiQuestionId), content: els.aiPrompt.value };
+      cleanLegacyAiDraftKey(state.aiQuestionId);
     }
   }
   async function setUiVersion(version) {
@@ -4834,13 +4839,10 @@ function videoExplanationMarkup(q) {
     els.aiMessages.scrollTop = els.aiMessages.scrollHeight;
   }
 
+  // 历史只从当前页面内存读取，不再 GET 旧会话文件（后端已改为 stateless）。
   async function loadAiHistory() {
     const q = currentAiQuestion();
-    if (!q || !state.aiProfileId) { renderAiHistory(null); return; }
-    try {
-      const response = await fetch(`./api/ai/conversations/${encodeURIComponent(state.aiProfileId)}/${encodeURIComponent(q.id)}`, { cache: "no-store" });
-      renderAiHistory(response.ok ? await response.json() : null);
-    } catch { renderAiHistory(null); }
+    renderAiHistory(q ? { messages: aiHistoryMessages() } : null);
   }
 
   async function loadAiProfiles() {
@@ -4854,6 +4856,7 @@ function videoExplanationMarkup(q) {
         els.aiProfileSelect.innerHTML = state.aiProfiles.length ? state.aiProfiles.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}${item.model ? ` · ${escapeHtml(item.model)}` : ""}</option>`).join("") : `<option value="">未配置 AI</option>`;
         els.aiProfileSelect.value = state.aiProfileId;
         updateAiStreaming();
+        updateAiReasoningPresets();
       }
       renderAiProfilesSettings();
       if (state.aiOpen) loadAiHistory();
@@ -4885,6 +4888,41 @@ function videoExplanationMarkup(q) {
     $("#ai-compose")?.classList.toggle("hidden", !state.aiOpen || state.aiTab !== "chat");
     if (state.aiTab === "note") renderQuestionNote();
   }
+
+  // 清空当前临时对话：不 confirm、不归档；生成中也可点。先作废在途生成，再清消息/内存/草稿。
+  async function clearAiChat() {
+    const q = currentAiQuestion();
+    const id = q?.id == null ? null : String(q.id);
+    const runIds = new Set([...state.aiRuns.keys(), activeAiRunId].filter(Boolean));
+    aiStreamStates.forEach((stream) => {
+      stream.disposed = true;
+      if (stream.timer) window.clearTimeout(stream.timer);
+      stream.timer = 0;
+      stream.controller?.abort();
+    });
+    aiStreamStates.clear();
+    syncAiServiceBusy();
+    state.aiRuns.clear();
+    activeAiRunId = "";
+    runIds.forEach((runId) => fetch(`./api/ai/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }).catch(() => {}));
+    $("#btn-ai-stop")?.setAttribute("hidden", "");
+    resetAiSession();
+    aiMemoryDraft = { questionId: id, content: "" };
+    cleanLegacyAiDraftKey(id);
+    if (els.aiPrompt) els.aiPrompt.value = "";
+    renderAiHistory(null);
+    // 清理当前 profile/题目的遗留会话文件；本窗口内存已清空，但遗留文件清理失败必须显式提示，不能静默。
+    if (state.aiProfileId && id) {
+      try {
+        const response = await fetch(`./api/ai/conversations/${encodeURIComponent(state.aiProfileId)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          toast(`本窗口对话已清空，但遗留会话文件清理失败（HTTP ${response.status}）：${data.error || "请稍后重试"}`);
+        }
+      } catch (error) { toast(`本窗口对话已清空，但遗留会话文件未能清理：${error.message || "本地服务未响应"}`); }
+    }
+  }
+
 
   function openAiDrawer(q = currentAiQuestion(), tab = "chat") {
     if (!previewPrivateAllowed()) return;
@@ -4992,6 +5030,56 @@ function videoExplanationMarkup(q) {
   let activeAiRunId = "";
   const aiStreamStates = new Set();
 
+  // 临时会话/草稿：只存在于当前页面内存，切题/切服务/清空即丢，刷新不恢复，不写 localStorage/sessionStorage。
+  // （aiMemoryDraft / aiMemoryHistory 的声明与 saveAiDraft 相邻，避免加载期 TDZ。）
+
+  function cleanLegacyAiDraftKey(questionId) {
+    if (questionId == null) return;
+    const id = String(questionId);
+    for (const key of [window.DaguanVersions.draftKey(id), `daguan_ai_draft_${id}`]) {
+      try { localStorage.removeItem(key); }
+      catch (error) {
+        // 失败必须显式上报，但只说明旧缓存键清理失败与“本轮仍只用内存”，不输出草稿内容/Key。
+        if (typeof console !== "undefined") console.warn(`清理旧 AI 草稿缓存失败（${key}）：本轮草稿只保存在页面内存，不落盘。`, error && error.message ? error.message : error);
+      }
+    }
+  }
+
+  function resetAiSession() {
+    aiMemoryHistory = { questionId: null, profileId: "", messages: [] };
+  }
+
+  function rememberAiTurn(q, userContent, assistantContent) {
+    const id = q?.id == null ? null : String(q.id);
+    if (!id || !state.aiProfileId) return;
+    if (aiMemoryHistory.questionId !== id || aiMemoryHistory.profileId !== state.aiProfileId) {
+      aiMemoryHistory = { questionId: id, profileId: state.aiProfileId, messages: [] };
+    }
+    const messages = aiMemoryHistory.messages;
+    messages.push({ role: "user", content: String(userContent ?? "") });
+    messages.push({ role: "assistant", content: String(assistantContent ?? "") });
+    if (messages.length > 400) messages.splice(0, messages.length - 400);
+  }
+
+  function aiHistoryMessages() {
+    const q = currentAiQuestion();
+    const id = q?.id == null ? null : String(q.id);
+    if (!id || aiMemoryHistory.questionId !== id || aiMemoryHistory.profileId !== state.aiProfileId) return [];
+    return aiMemoryHistory.messages;
+  }
+
+  // 思考档位选项：当前档案的自定义档位 + 空「模型默认」；初始值=档案默认档位。选择仅本窗口生效，不 PATCH 服务默认。
+  function updateAiReasoningPresets() {
+    const select = $("#ai-reasoning-preset");
+    if (!select) return;
+    const profile = state.aiProfiles.find((p) => p.id === state.aiProfileId);
+    const presets = Array.isArray(profile?.reasoningPresets) ? profile.reasoningPresets : [];
+    const desired = String(profile?.defaultReasoningPresetId || "");
+    select.innerHTML = [`<option value="">模型默认（不附加参数）</option>`]
+      .concat(presets.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`)).join("");
+    select.value = presets.some((item) => String(item.id) === desired) ? desired : "";
+  }
+
   function clearAiForQuestion(q) {
     const nextId = q?.id == null ? null : String(q.id);
     if (state.aiQuestionId === nextId) return;
@@ -5011,9 +5099,11 @@ function videoExplanationMarkup(q) {
     activeAiRunId = "";
     runIds.forEach((runId) => fetch(`./api/ai/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }).catch(() => {}));
     $("#btn-ai-stop")?.setAttribute("hidden", "");
-    if (els.aiPrompt) {
-      try { els.aiPrompt.value = nextId ? localStorage.getItem(window.DaguanVersions.draftKey(nextId)) || "" : ""; } catch { els.aiPrompt.value = ""; }
-    }
+    // 临时草稿/会话只属于当前题：切题即丢上一题的草稿与内存历史，并顺手清旧键防复活。
+    cleanLegacyAiDraftKey(nextId);
+    if (aiMemoryDraft.questionId !== nextId) aiMemoryDraft = { questionId: nextId, content: "" };
+    resetAiSession();
+    if (els.aiPrompt) els.aiPrompt.value = (aiMemoryDraft.questionId === nextId ? aiMemoryDraft.content : "");
     renderAiHistory(null);
     const line = $("#ai-context-line");
     if (line) line.textContent = q ? `#${q.id} · ${q.source || TYPE_LABEL[q.type] || "当前题目"}` : "先选择一道题";
@@ -5089,6 +5179,10 @@ function videoExplanationMarkup(q) {
     const questionId = String(q.id);
     if (!state.aiProfileId) await loadAiProfiles();
     if (!state.aiProfileId) { toast("请先配置 AI 服务"); openAiSettings(); return; }
+    // 当前页面临时会话：最多 24 条上下文；思考档位只发已保存档位 id（空串=模型默认），不发参数 JSON。
+    const history = aiHistoryMessages().slice(-24).map((m) => ({ role: m.role, content: m.content }));
+    const presetSelect = $("#ai-reasoning-preset");
+    const reasoningPresetId = presetSelect ? String(presetSelect.value || "") : undefined;
     const userItem = renderAiMessage(text, "user");
     const pending = renderAiMessage("", "assistant", true);
     els.aiMessages?.append(userItem, pending);
@@ -5123,7 +5217,9 @@ function videoExplanationMarkup(q) {
     }
     let runId = "";
     try {
-      const response = await fetch("./api/ai/chat", { method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify({ profileId: state.aiProfileId, question: aiQuestionPayload(q), prompt: text, includePrivate: $("#ai-include-private")?.checked === true, images }) });
+      const body = { profileId: state.aiProfileId, question: aiQuestionPayload(q), prompt: text, includePrivate: $("#ai-include-private")?.checked === true, images, history };
+      if (reasoningPresetId !== undefined) body.reasoningPresetId = reasoningPresetId;
+      const response = await fetch("./api/ai/chat", { method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify(body) });
       if (!response.ok) throw new Error(`AI 请求失败（HTTP ${response.status}）`);
       if (stream.disposed || state.aiQuestionId !== questionId) return;
       runId = response.headers.get("X-Daguan-Run-Id");
@@ -5142,13 +5238,18 @@ function videoExplanationMarkup(q) {
       }
       if (stream.disposed || state.aiQuestionId !== questionId) return;
       pending.replaceWith(renderAiMessage(stream.answer, "assistant"));
+      // 成功完成一轮才把 user prompt + 正式答案加入当前页面临时会话。
+      rememberAiTurn(q, text, stream.answer);
       if (runId) state.aiRuns.delete(runId);
       activeAiRunId = "";
       $("#btn-ai-stop")?.setAttribute("hidden", "");
     } catch (error) {
       if (!stream.disposed && state.aiQuestionId === questionId) pending.replaceWith(renderAiMessage(`AI 暂时没有完成回答：${error.message || error}`, "assistant"));
-      activeAiRunId = "";
-      $("#btn-ai-stop")?.setAttribute("hidden", "");
+      // 仅在本次流仍拥有当前运行时复位停止按钮：被清空/作废的旧流不得关掉新运行的停止按钮。
+      if (!stream.disposed && (!runId || activeAiRunId === runId)) {
+        activeAiRunId = "";
+        $("#btn-ai-stop")?.setAttribute("hidden", "");
+      }
     } finally {
       stream.disposed = true;
       if (stream.timer) window.clearTimeout(stream.timer);
@@ -5195,6 +5296,7 @@ function videoExplanationMarkup(q) {
         if (!profiles.some(p => p.id === state.aiProfileId)) state.aiProfileId = profiles[0]?.id || "";
         if (els.aiProfileSelect) { els.aiProfileSelect.innerHTML = profiles.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} · ${escapeHtml(p.model || "未选模型")}</option>`).join(""); els.aiProfileSelect.value = state.aiProfileId; }
         updateAiStreaming();
+        updateAiReasoningPresets();
       },
     });
   }
@@ -5825,7 +5927,19 @@ function videoExplanationMarkup(q) {
       allowed: () => previewPrivateAllowed(), error: message => toast(message),
       changed: profile => { Object.assign(state.aiProfiles.find(p => p.id === profile.id) || {}, profile); },
     });
-    $("#ai-profile-select")?.addEventListener("change", (event) => { if (aiStreamStates.size) return; state.aiProfileId = event.target.value; saveAiPrefs({ ...aiPrefs(), profileId: state.aiProfileId }); updateAiStreaming(); loadAiHistory(); });
+    $("#ai-profile-select")?.addEventListener("change", (event) => {
+      if (aiStreamStates.size) return;
+      state.aiProfileId = event.target.value;
+      saveAiPrefs({ ...aiPrefs(), profileId: state.aiProfileId });
+      updateAiStreaming();
+      // 切服务：更新思考档位选项、丢弃当前临时会话与草稿。
+      updateAiReasoningPresets();
+      resetAiSession();
+      aiMemoryDraft = { questionId: state.aiQuestionId, content: "" };
+      if (els.aiPrompt) els.aiPrompt.value = "";
+      loadAiHistory();
+    });
+    $("#ai-clear-btn")?.addEventListener("click", clearAiChat);
     document.querySelectorAll("[data-ai-prompt]").forEach((button) => button.addEventListener("click", () => sendAiMessage(button.dataset.aiPrompt)));
     $("#ai-compose")?.addEventListener("submit", (event) => { event.preventDefault(); sendAiMessage(); });
     $("#ai-prompt")?.addEventListener("keydown", (event) => {

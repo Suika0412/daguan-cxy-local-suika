@@ -33,6 +33,7 @@ function createContext(initialStorage = {}) {
     setItem: (key, value) => session.set(key, String(value)),
     removeItem: key => session.delete(key),
   };
+  const warnings = [];
   const sandbox = {
     addEventListener: () => {},
     navigator: {},
@@ -40,6 +41,7 @@ function createContext(initialStorage = {}) {
     sessionStorage,
     location: { pathname: "/index.html", href: "http://127.0.0.1/index.html", replace: () => {} },
     document,
+    console: { warn: (...args) => warnings.push(args), log() {}, error() {}, info() {} },
     URL,
     setTimeout,
     clearTimeout,
@@ -55,7 +57,7 @@ function createContext(initialStorage = {}) {
   vm.runInContext(fs.readFileSync(new URL("ui-version.js", root), "utf8"), sandbox, { filename: "ui-version.js" });
   loadNewUiModules(sandbox);
   vm.runInContext(fs.readFileSync(new URL("app-new.js", root), "utf8"), sandbox, { filename: "app-new.js" });
-  return { sandbox, storage, session, localStorage, sessionStorage, document, documentListeners, appearanceVariables };
+  return { sandbox, storage, session, localStorage, sessionStorage, document, documentListeners, appearanceVariables, warnings };
 }
 
 function syncElements(document) {
@@ -183,30 +185,57 @@ test("最近学习位置写入结束后释放 in-flight 状态，允许服务事
   assert.equal(StateSync.lastStudyInFlight, null);
 });
 
-test("AI 草稿写入共享键 daguan_ai_draft_v1:<qid>", () => {
-  const { sandbox, storage } = createContext();
+test("AI 草稿只保留在当前页面内存，不写 localStorage/sessionStorage 且清理同题旧键", () => {
+  // 预置旧持久草稿：读/写时应被清理，避免在新界面“复活”。
+  const { sandbox, storage, session } = createContext({
+    "daguan_ai_draft_v1:3356": "旧的持久草稿",
+    "daguan_ai_draft_3356": "更旧的草稿",
+    "daguan_local_progress_v1": "KEEP",
+  });
   const Storage = sandbox.window.StorageService;
-  Storage.saveAIDraft(3356, "切换后恢复的草稿");
-  assert.equal(storage.get("daguan_ai_draft_v1:3356"), "切换后恢复的草稿");
-  assert.equal(Storage.getAIDraft("3356"), "切换后恢复的草稿");
+  Storage.saveAIDraft(3356, "当前页面草稿");
+  assert.equal(Storage.getAIDraft("3356"), "当前页面草稿");
+  assert.equal(storage.has("daguan_ai_draft_v1:3356"), false, "读/写时清理同题旧键");
+  assert.equal(storage.has("daguan_ai_draft_3356"), false, "连同更早的 daguan_ai_draft_<id> 一并清理");
+  assert.equal([...storage.keys()].some((key) => key.includes("daguan_ai_draft")), false, "不再写入任何 AI 草稿键");
+  assert.equal(session.size, 0, "不写 sessionStorage");
+  assert.equal(storage.get("daguan_local_progress_v1"), "KEEP", "不触碰非 AI 的学习数据");
+  // 清空草稿：内存清空且旧键仍不存在。
   Storage.saveAIDraft(3356, "");
+  assert.equal(Storage.getAIDraft("3356"), "");
   assert.equal(storage.has("daguan_ai_draft_v1:3356"), false);
 });
 
-test("旧版新版草稿键迁移：只填空白目标键且可重复执行", () => {
+test("不再迁移/恢复旧 AI 草稿键，非 AI 的既有学习数据不受影响", () => {
   const { sandbox, localStorage } = createContext();
   const Storage = sandbox.window.StorageService;
   localStorage.setItem("daguan_ai_draft_42", "旧键草稿");
-  assert.equal(Storage.migrateLegacyKeys() >= 1, true);
-  assert.equal(localStorage.getItem("daguan_ai_draft_v1:42"), "旧键草稿");
-  // 幂等：再次执行不报错、不重复
+  localStorage.setItem("daguan_local_favorites_v1", "KEEP");
   Storage.migrateLegacyKeys();
-  assert.equal(localStorage.getItem("daguan_ai_draft_v1:42"), "旧键草稿");
-  // 目标键已有内容时不覆盖
-  localStorage.setItem("daguan_ai_draft_43", "旧内容");
-  localStorage.setItem("daguan_ai_draft_v1:43", "新内容");
+  assert.equal(localStorage.getItem("daguan_ai_draft_v1:42"), null, "旧草稿不再迁移到共享键");
+  assert.equal(localStorage.getItem("daguan_ai_draft_42"), "旧键草稿", "旧键原样保留，不做自动清理");
+  assert.equal(localStorage.getItem("daguan_local_favorites_v1"), "KEEP", "非 AI 学习数据迁移行为不变");
+  // 幂等：再次执行不报错、结果一致
   Storage.migrateLegacyKeys();
-  assert.equal(localStorage.getItem("daguan_ai_draft_v1:43"), "新内容");
+  assert.equal(localStorage.getItem("daguan_ai_draft_v1:42"), null);
+});
+
+test("旧 AI 草稿键清理失败时明确 console.warn，且新输入仍只在内存", () => {
+  const { sandbox, storage, localStorage, warnings } = createContext();
+  const Storage = sandbox.window.StorageService;
+  // 模拟受限存储：删除旧草稿键被拒绝。
+  const realRemove = localStorage.removeItem.bind(localStorage);
+  localStorage.removeItem = key => {
+    if (String(key).includes("daguan_ai_draft")) throw new Error("removeItem denied");
+    realRemove(key);
+  };
+  localStorage.setItem("daguan_ai_draft_v1:3356", "旧的持久草稿");
+  Storage.saveAIDraft(3356, "本轮内存输入");
+  assert.equal(Storage.getAIDraft("3356"), "本轮内存输入", "新输入仍可读取");
+  assert.ok(warnings.some(args => String(args[0]).includes("清理旧 AI 草稿缓存失败")), "清理失败要有明确告警，不能静默吞掉");
+  assert.ok(warnings.every(args => !String(args.join(" ")).includes("本轮内存输入")), "告警不得输出草稿内容");
+  assert.equal(storage.get("daguan_ai_draft_v1:3356"), "旧的持久草稿", "新输入不写入 localStorage（旧键因拒绝删除仍在，但不会被读取/复活）");
+  assert.equal(Storage.getAIDraft("3356"), "本轮内存输入", "后续读取仍返回内存值，不复活旧键");
 });
 
 test("旧新版外观偏好先于 bootstrap 迁入新版 key，重复迁移幂等", () => {
