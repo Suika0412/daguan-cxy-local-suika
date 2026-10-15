@@ -1,1 +1,3 @@
-题图 PNG 文件由 tool/import_question_images.js 校验并导入到此目录。
+题图 PNG 不再入库，由仓库根的 `npm run android:prepare`
+（android/tool/prepare-question-images.mjs）从 web/data/assets 按题库引用生成，
+内容寻址、默认硬链接复用同一份物理数据。请勿原地编辑本目录中的图片，改动后重跑准备。

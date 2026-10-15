@@ -1,8 +1,11 @@
-const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
+// 仓库根 package.json 声明 type: module，且 android/ 下没有自己的 package.json，
+// 因此本文件按 ESM 解析；路径一律由自身位置推导，可从任意工作目录运行。
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const appRoot = path.resolve(__dirname, "..");
+const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const readJson = (name) =>
   JSON.parse(fs.readFileSync(path.join(appRoot, "assets", name), "utf8"));
 const questions = readJson("questions.json");

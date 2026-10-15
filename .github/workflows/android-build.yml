@@ -1,0 +1,80 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - "web/data/assets/**"
+      - "package.json"
+      - ".github/workflows/android-build.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "web/data/assets/**"
+      - "package.json"
+      - ".github/workflows/android-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.8"
+          channel: stable
+          cache: true
+
+      # 题图在 Android 侧由 web/data/assets 硬链接而来，必须先准备再解析包与构建。
+      - name: Prepare and verify offline assets
+        run: npm run android:verify
+
+      - name: Resolve packages
+        working-directory: android
+        run: flutter pub get
+
+      - name: Analyze source
+        working-directory: android
+        run: flutter analyze
+
+      - name: Run tests
+        working-directory: android
+        run: flutter test
+
+      - name: Build community APK
+        working-directory: android
+        run: flutter build apk --release
+
+      - name: Prepare artifact
+        working-directory: android
+        shell: powershell
+        run: Copy-Item build/app/outputs/flutter-apk/app-release.apk daguan-math-community-v1.1.6.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: daguan-math-community-v1.1.6
+          path: android/daguan-math-community-v1.1.6.apk
+          if-no-files-found: error

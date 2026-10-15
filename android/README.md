@@ -45,6 +45,7 @@ Android 应用与原站之间的收藏、掌握状态同步，需要配合“大
 
 ## 开发环境
 
+- Node.js 24（仅用于题图准备与离线题库校验，无第三方依赖）
 - Flutter `3.44.8` stable
 - Dart `3.12.2`
 - JDK 17
@@ -52,25 +53,40 @@ Android 应用与原站之间的收藏、掌握状态同步，需要配合“大
 
 Gradle 由仓库内的 Gradle Wrapper 自动下载。Flutter 和 Android SDK 不需要放进源码仓库。
 
+## 题图准备
+
+Android 的题图运行路径是 `android/assets/question_images/<hash>.png`，与题库里
+`asset://sha256/<hash>` 的引用一一对应。这些 PNG 不再作为独立副本入库，而是由
+`web/data/assets/<hash>.png` 生成：同一磁盘卷上默认创建硬链接，两边共用一份物理数据；
+文件系统或平台不支持硬链接时（例如跨盘），脚本回退为复制并在统计里显式报告原因。
+源目录只在准备时读取，生成物不要原地编辑——改了源图或题库后重跑准备即可。
+
+在仓库根目录执行：
+
+```powershell
+npm run android:prepare   # 生成/刷新 android/assets/question_images
+```
+
+脚本会先完整预检题库引用格式、所有源图是否存在、SHA-256 与 PNG 签名，预检失败时不改动已有输出。
+
 ## 构建
 
 在仓库根目录执行：
 
 ```powershell
-flutter pub get
-node tool/verify_project.js
-flutter analyze
-flutter test
-flutter build apk --release
+npm run android:verify    # 先准备题图，再校验离线题库与隐私边界
+npm run android:build     # 先校验，再在 android/ 下 flutter build apk --release
 ```
+
+需要单独手工运行 `flutter analyze` / `flutter test` 时，先执行 `npm run android:prepare` 生成题图。
 
 生成的 APK 位于：
 
 ```text
-build/app/outputs/flutter-apk/app-release.apk
+android/build/app/outputs/flutter-apk/app-release.apk
 ```
 
-Windows 用户也可以双击 `构建APK.cmd`。脚本会执行检查，在源码目录的上一层创建 `daguan-math-v1.1.6-release` 发布目录并放入 APK。源码目录中的 `build` 会保留以加快后续构建，但已被 Git 忽略，不会上传。有发布密钥时 APK 名为 `daguan-math-v1.1.6.apk`，否则名为 `daguan-math-community-v1.1.6.apk`。
+Windows 用户也可以双击 `构建APK.cmd`。脚本会先准备题图并执行检查，在源码目录的上一层创建 `daguan-math-v1.1.6-release` 发布目录并放入 APK。源码目录中的 `build` 会保留以加快后续构建，但已被 Git 忽略，不会上传。有发布密钥时 APK 名为 `daguan-math-v1.1.6.apk`，否则名为 `daguan-math-community-v1.1.6.apk`。
 
 ### APK 签名说明
 
@@ -92,11 +108,12 @@ keyPassword=your-key-password
 ## 目录结构
 
 ```text
-android/                 Android 原生工程和 Gradle Wrapper
-assets/                  离线题库、章节、空白初始进度和题图
-lib/                     Flutter 应用源码
-test/                    自动化测试和视觉基准
-tool/verify_project.js   离线题库与隐私边界校验
+android/                          Android 原生工程和 Gradle Wrapper
+assets/                           离线题库、章节、空白初始进度和题图
+lib/                              Flutter 应用源码
+test/                             自动化测试和视觉基准
+tool/verify_project.js            离线题库与隐私边界校验
+tool/prepare-question-images.mjs  从 web/data/assets 生成题图（硬链接优先）
 ```
 
 ## 隐私

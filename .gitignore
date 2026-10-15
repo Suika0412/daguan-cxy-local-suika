@@ -10,6 +10,7 @@ node_modules/
 __pycache__/
 web/.cache/
 web/data/assets/.download-tmp/
+web/data/.staging-*/
 
 # Local Node console state and credentials
 data/*.json
@@ -34,6 +35,9 @@ android/.flutter-plugins-dependencies
 android/.packages
 android/android/.gradle/
 android/android/app/build/
+
+# Android 题图由 `npm run android:prepare` 从 web/data/assets 硬链接生成，不入库
+android/assets/question_images/*.png
 
 # 标注管线中间产物与本地截图（不入库）
 tools/tagger-out/
