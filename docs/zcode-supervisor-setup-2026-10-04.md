@@ -1,16 +1,16 @@
 # ZCode-supervisor 配置与验收记录
 
-2026-10-04，项目 `F:\AI\大观园本地`，分支 main，HEAD `3d407d5`。开工时已有题库与文档改动，本次保留。未提交、推送、打包或发布。
+2026-10-04，项目 `<canonical-repo-root>`，分支 main，HEAD `3d407d5`。开工时已有题库与文档改动，本次保留。未提交、推送、打包或发布。
 
 ## 已安装和配置
 
-- 现有 ZCode：`F:\Tools\ZCode\ZCode.exe`，桌面版 3.14.3.7762；bundled CLI `resources/glm/zcode.cjs`，0.16.9。版本、help、doctor 和真实 headless 执行均已验证。
-- 通过 PyPI 安装上游最新 `zcode-supervisor==0.0.2`，工具环境位于 `F:\AI\zcode-supervisor-tools`。上游来源：[AkiGarage/ZCode-supervisor](https://github.com/AkiGarage/ZCode-supervisor)。源代码参考 checkout 为 `557a777ae2ca336ce0006c43a91c612d1ca3a6f2`，tag v0.0.2。
+- 现有 ZCode：`<zcode-app>\ZCode.exe`，桌面版 3.14.3.7762；bundled CLI `resources/glm/zcode.cjs`，0.16.9。版本、help、doctor 和真实 headless 执行均已验证。
+- 通过 PyPI 安装上游最新 `zcode-supervisor==0.0.2`，工具环境位于 `<zcode-tools>`。上游来源：[AkiGarage/ZCode-supervisor](https://github.com/AkiGarage/ZCode-supervisor)。源代码参考 checkout 为 `557a777ae2ca336ce0006c43a91c612d1ca3a6f2`，tag v0.0.2。
 - 已实际执行 zcode-install-repo，并再次确认幂等安装返回 ok=true。生成 `.codex/zcode-routing.json`、`.codex/ZCODE_DELEGATION.md`、`.agents/mcp.json` 与 AGENTS 路由入口。
 - 上游按单个 packet 执行；新增 `scripts/zcode-pool.py` 作为外层调度，保留上游 packet、snapshot、scope audit、secret scan、validation 与路由风险检查。
 - 初始配置并发 8，多个 batch 共享账号锁；之后按用户明确授权提高到 16，见末尾升级记录。初始 14 项本地测试含八线程同时运行，但真实 provider smoke 为两个 worker，不构成真实八并发稳定性证明。
 - 每个实现 worker 使用独立 worktree 或 fixture、HOME、数据库、TEMP 和结果目录；F 盘存储。Codex 明确 allowed_files 与验证，回收完整差异，发出 Review 和修复意见，执行最终测试并保留最终接受权。
-- `F:\AI\zcode-launchers` 提供 zcode、zcodectl、zcode-supervisor、zcode-install-repo、zcode-auto-route 同名命令，并加入用户 PATH。当前应用进程如尚未刷新 PATH，可使用 `python scripts/zcode-env.py <命令>`。
+- `<zcode-launchers>` 提供 zcode、zcodectl、zcode-supervisor、zcode-install-repo、zcode-auto-route 同名命令，并加入用户 PATH。当前应用进程如尚未刷新 PATH，可使用 `python scripts/zcode-env.py <命令>`。
 
 ## Windows 与 provider 兼容处理
 

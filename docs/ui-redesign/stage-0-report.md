@@ -58,7 +58,7 @@ daguan-qa.py 覆盖项：双向切换保持题号/掌握/易错/批注/AI 草稿
 
 | 实例 | 地址 | 启动方式 |
 |---|---|---|
-| A 常规 | `http://127.0.0.1:18089` | `DAGUAN_DATA_DIR=F:/AI/大观园本地/.build/ui-redesign/stage-0/qa-data PORT=18089 node local-server/server.mjs` |
+| A 常规 | `http://127.0.0.1:18089` | `DAGUAN_DATA_DIR=<canonical-repo-root>/.build/ui-redesign/stage-0/qa-data PORT=18089 node local-server/server.mjs` |
 | B 预览模式 | `http://127.0.0.1:18090` | 同上但 `PORT=18090`、数据目录 `qa-data-preview`、`DAGUAN_PREVIEW_KEY=daguan-stage0-qa-key` |
 
 18089 在启动前已核实无人占用（netstat 为空）。两个实例仍在后台运行供验收复用；日志在 `stage-0/server.log`、`stage-0/server-preview.log`。未向任何真实官网写入。

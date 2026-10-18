@@ -1,7 +1,7 @@
 # 桌面版阶段 1：共享服务实施记录
 
 日期：2026-09-27（Asia/Hong_Kong）
-工作区/分支：`F:\AI\daguan-desktop-stage0-worktree` / `codex/daguan-desktop-stage0`
+工作区/分支：`<stage-worktree>` / `codex/daguan-desktop-stage0`
 基线：阶段 0 已由负责人独立验收通过。本阶段未进入 Electron、安装器或发布工作。
 
 ## 实施内容

@@ -4,16 +4,16 @@
 
 ## Git 与恢复点
 
-- 原工作区 `F:\AI\大观园本地` 保持在 `main` / `origin/main`，HEAD `c0c8cc9d00f9e78e5abad0d56674d3de1d20008e`；检查前后 `git status --short --branch` 一致，所有原有未跟踪文件仍在原处。
+- 原工作区 `<canonical-repo-root>` 保持在 `main` / `origin/main`，HEAD `c0c8cc9d00f9e78e5abad0d56674d3de1d20008e`；检查前后 `git status --short --branch` 一致，所有原有未跟踪文件仍在原处。
 - 未找到适用的 `AGENTS.md`。旧版归档分支 `legacy/pre-redesign-2026-09-27` 与其远端跟踪引用均为 `28a1a6cafd0f6f57e5b3d9baed545e0158b2cefc`。
-- 独立工作分支 `codex/daguan-desktop-stage0` 位于 `F:\AI\daguan-desktop-stage0-worktree`，从上述 main HEAD 创建；当前只增加本基线记录。
-- 可恢复快照：`F:\AI\daguan-desktop-stage0-snapshot-20260927-213634`。`main.bundle` 保存 main 可达历史；`untracked/` 保留原工作区当时 27 个未跟踪文件副本，`untracked-files.txt` 和 `untracked-sha256.json` 记录路径与哈希。快照未包含被忽略的 `data/`，个人数据留在原目录且检查前后校验一致。
+- 独立工作分支 `codex/daguan-desktop-stage0` 位于 `<stage-worktree>`，从上述 main HEAD 创建；当前只增加本基线记录。
+- 可恢复快照：`<stage-snapshot>`。`main.bundle` 保存 main 可达历史；`untracked/` 保留原工作区当时 27 个未跟踪文件副本，`untracked-files.txt` 和 `untracked-sha256.json` 记录路径与哈希。快照未包含被忽略的 `data/`，个人数据留在原目录且检查前后校验一致。
 
 ## 当前产品与打包基线
 
 - `package.json` 提供 Node 服务启动、Windows SEA 构建、Release ZIP 打包、题库同步、校验和自动测试命令；Node 运行时为 `v24.15.0`，npm 为 `11.12.1`。
 - Windows SEA 入口在 `packaging/sea-entry.cjs`：单文件内嵌 web 与 Node 服务，默认页面为 `index.html`，选择 8080–8099 的本机端口，可复用健康服务；数据目录为 `%LOCALAPPDATA%\DaguanMath\data`。源码开发服务默认使用仓库 `data/`，也支持 `DAGUAN_DATA_DIR` 覆盖。SEA 现有二进制会在首次运行释放内置应用文件。
-- 检查时 `dist/` 已有 2026-09-06 生成的 EXE 与 ZIP（单文件 EXE 367,804,416 字节，ZIP 310,302,886 字节）；没有重新打包或改动这些产物。用隔离目录 `F:\AI\daguan-desktop-stage0-snapshot-20260927-213634\existing-sea-check` 执行既有 EXE 的 `--check`，退出码 0，返回 `package-ok http://127.0.0.1:8080/`。只有 Node SEA 实验功能提示。
+- 检查时 `dist/` 已有 2026-09-06 生成的 EXE 与 ZIP（单文件 EXE 367,804,416 字节，ZIP 310,302,886 字节）；没有重新打包或改动这些产物。用隔离目录 `<stage-snapshot>\existing-sea-check` 执行既有 EXE 的 `--check`，退出码 0，返回 `package-ok http://127.0.0.1:8080/`。只有 Node SEA 实验功能提示。
 - 双版本入口和兼容性覆盖在 `web/index.html`、`web/legacy.html`、`web/app2.js`、`web/app-legacy.js`、`web/ui-version.js` 及 `test/dual-ui.test.mjs`。HTTP 实测新版入口 `/index.html?ui=new&layout=sidebar-v112` 与显式旧版 `/legacy.html?ui=old` 均返回 200；页面标题分别为“学习空间 · 本地大观园”和“大观园 · 本地刷题”。两者依赖本地服务共享记录的完整交互由既有自动化覆盖；此阶段没有进行人工做题/保存操作。
 
 ## 自动验证
@@ -26,7 +26,7 @@
 
 ## 数据与原工作区不变证据
 
-- 检查前后对 `F:\AI\大观园本地\data` 递归文件逐项比较 SHA-256、长度与文件数量：29 个文件、15,096,378 字节，哈希差异 0、增删 0。数据含个人进度、AI 配置和历史备份；清单/哈希记录在快照 `data-before-sha256.json`。内容未打印、未复制进工作分支。
+- 检查前后对 `<canonical-repo-root>\data` 递归文件逐项比较 SHA-256、长度与文件数量：29 个文件、15,096,378 字节，哈希差异 0、增删 0。数据含个人进度、AI 配置和历史备份；清单/哈希记录在快照 `data-before-sha256.json`。内容未打印、未复制进工作分支。
 - 检查前后原工作区 27 个未跟踪文件全部仍存在且与快照逐文件哈希一致；差异 0。
 - 检查时 `http://127.0.0.1:8080/api/health` 返回 `daguan-local-console` 健康；检查后服务仍可读取健康端点。新版与旧版页面只进行了 GET 检查。
 

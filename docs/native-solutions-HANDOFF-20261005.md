@@ -55,12 +55,12 @@
 
 | 名称 | 绝对目录与用途 |
 | --- | --- |
-| REPO | `F:\AI\大观园本地`，当前生产源代码工作区 |
+| REPO | `<canonical-repo-root>`，当前生产源代码工作区 |
 | B | `F:\AI\tmp\daguan-native-rematch-20261004`，匹配、审查、导入与截图证据 |
 | S | `F:\AI\tmp\daguan-native-rematch-20261004\source`，私有辅助实现与候选数据 |
 | P | `F:\AI\tmp\daguan-zcode-pool`，历史隔离 worker 结果，只读复用 |
 | OLD | `F:\AI\tmp\daguan-native-solutions-20261004`，导入前基线与历史备份 |
-| HTML | `F:\AI\mineru-html-20261004`，九份 PDF 对应的 19 份 MinerU HTML，累计 2,840 页 |
+| HTML | `<mineru-work>`，九份 PDF 对应的 19 份 MinerU HTML，累计 2,840 页 |
 
 原 PDF 均在 `F:\Download`：`1.函数极限连续.pdf`、`2.一元微分.pdf`、`3.1积分计算（核心题库）.pdf`、`3.2积分应用（核心题库）.pdf`、`3.3反常积分.pdf`、`4.微分方程.pdf`、`5.多元微分.pdf`、`6.二重积分.pdf`、`7.线代(1).pdf`。
 

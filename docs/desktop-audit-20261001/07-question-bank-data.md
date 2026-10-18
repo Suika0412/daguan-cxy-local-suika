@@ -1,8 +1,8 @@
 # 07 · 题库数据 / 分片清单 / 数据加工工具 只读审计
 
-- 审计对象：`F:\AI\大观园本地`（正本 checkout，分支 `main`，HEAD `126266d`，package `daguan-math-local` v1.0.10）
+- 审计对象：`<canonical-repo-root>`（正本 checkout，分支 `main`，HEAD `126266d`，package `daguan-math-local` v1.0.10）
 - 审计性质：**只读**。未修改/删除/移动任何仓库源码或数据文件；未执行 `git reset/clean/stash`；未推送部署；未运行会写数据的 `npm run sync:data`。
-- 临时分析脚本：`C:\Users\14666\AppData\Local\Temp\dg-audit-07\`（`stats.mjs`、`drill.mjs`、`drill2.mjs`、`drill3.mjs`），均不落仓库。
+- 临时分析脚本：`<WINDOWS_USER>\AppData\Local\Temp\dg-audit-07\`（`stats.mjs`、`drill.mjs`、`drill2.mjs`、`drill3.mjs`），均不落仓库。
 - 审计时间：2026-10-01
 
 ---
@@ -43,7 +43,7 @@
 - **P0-1 25 道选择题选项为空、无法作答**（`web/data/shards/概率统计.json`，根因 `web/data/local_question_banks/mzlj-probability.json` + `shared/local-question-banks.mjs` 校验缺口）——用户能看到题干和答案，但**渲染不出任何可点选项**，其中 2 题还是多选答案却标成单选。
 - **P1-1 孤立分片 `高等数学-核心.json`**（8 题）游离于 manifest / id_index / search_index / category_questions 之外，其分类根「高等数学-核心」不是真实顶层分类——8 题在应用内不可见、不可搜索，且 `verify` 永远查不出来。
 - **P1-2 41 张题图缺失**，42 道题显示破图；`verify` 只 `warn` 不 fail，所以会长期存在。
-- **P1-3 4 个 Python 加工工具硬编码 `F:/ai/daguan-cxy-local/web/data`**（陈旧树，6342 题 vs 正本 6521 题），现在运行会静默读写错误的那棵树。
+- **P1-3 4 个 Python 加工工具硬编码 `<repo-root>/web/data`**（陈旧树，6342 题 vs 正本 6521 题），现在运行会静默读写错误的那棵树。
 
 ---
 
@@ -99,7 +99,7 @@ const options = Array.isArray(q.options) && q.options.length ? document.createEl
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const q=JSON.parse(require('fs').readFileSync('web/data/shards/概率统计.json','utf8')).filter(x=>x.type!=='subjective'&&(!x.options||!x.options.length));console.log(q.length);console.log(q.map(x=>[x.id,x.answer]).slice(0,5))"
 ```
 输出 `25` 及上述答案样本。
@@ -139,13 +139,13 @@ manifest 声明: 历年真题 未分类 概率统计 模拟哥专区 线性代�
 
 **为什么不会被自动清理：** `local-server/official-question-bank.mjs:9-16` 的 `shardByRoot` / `fileByShard` 只覆盖 6 个分片名，同步流程既不会覆盖也不会删除这个文件。
 
-**为什么不是偶发：** 陈旧 checkout `F:\ai\daguan-cxy-local\web\data\shards\` 里**同样存在** `高等数学-核心.json`（两树的 shards 文件名列表完全一致）→ 这是长期遗留物，已跨多次同步存活。
+**为什么不是偶发：** 陈旧 checkout `<repo-root>\web\data\shards\` 里**同样存在** `高等数学-核心.json`（两树的 shards 文件名列表完全一致）→ 这是长期遗留物，已跨多次同步存活。
 
 **影响：** 8 道题在应用内不可见、不可搜索、无法通过分类进入；`id_index`/`search_index`/`category_questions` 与磁盘实际内容存在永久性 8 题缺口；一旦有人误按「磁盘即真相」重建索引，会引入一批分类树里不存在的幽灵分类。
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/manifest.json','utf8'));const disk=fs.readdirSync('web/data/shards').filter(f=>f.endsWith('.json'));console.log('declared',Object.values(m.shards).map(s=>s.file.split('/').pop()).sort());console.log('disk',disk.sort())"
 ```
 
@@ -194,7 +194,7 @@ node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/man
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node tools/verify-web-data.mjs
 ```
 
@@ -212,26 +212,26 @@ node tools/verify-web-data.mjs
 **严重度：** P1（高误操作风险）
 **位置：** `tools/annotate_questions.py:6-7`、`tools/merge_agent_tags.py:5,10`、`tools/prep_chunks.py:5-6`、`tools/merge_luna_tags.py:6,7`
 
-**证据：** 这 4 个脚本都硬编码了 `F:/ai/daguan-cxy-local/web/data`（注意是小写 `ai`，且是**另一个** checkout 目录名），而不是当前正本 `F:\AI\大观园本地`。
+**证据：** 这 4 个脚本都硬编码了 `<repo-root>/web/data`（注意是小写 `ai`，且是**另一个** checkout 目录名），而不是当前正本 `<canonical-repo-root>`。
 
 实测该路径**真实存在**，且是一棵**过时快照**：
 
-| 项 | 正本 `F:\AI\大观园本地` | 硬编码的 `F:\ai\daguan-cxy-local` |
+| 项 | 正本 `<canonical-repo-root>` | 硬编码的 `<repo-root>` |
 |---|---|---|
 | `manifest.total` | **6521** | **6342** |
 | `manifest.synced_at` | 2026-09-30T00:50:01.853Z | 2026-09-21T08:54:18.761Z |
 | shards 文件名列表 | 含 `高等数学-核心.json` | 同样含（7 个，列表一致） |
 | `annotations.json` | 1727026 bytes，sha256 前 16 位 `00a5131480041448` | **完全相同** |
 
-`tools/merge_luna_tags.py:6` 还额外硬编码了临时目录 `LUNA = r"C:/Users/14666/AppData/Local/Temp/luna-bank/answers/linear-algebra-7/chapters"`（临时目录随时会被清理，不可复现）。
+`tools/merge_luna_tags.py:6` 还额外硬编码了临时目录 `LUNA = r"C:/Users/<WINDOWS_USER>/AppData/Local/Temp/luna-bank/answers/linear-algebra-7/chapters"`（临时目录随时会被清理，不可复现）。
 
 **影响：** 现在任何人跑 `python tools/merge_agent_tags.py` / `annotate_questions.py` / `prep_chunks.py` / `merge_luna_tags.py`，都会**静默读写另一棵 6342 题的旧树**——既不报错，也不提示，结果对当前正本完全无效；更糟的是若把这些脚本当作「重新生成标注」的工具，会把基于旧题集的产物写回旧树而让人误以为正本已更新。`annotations.json` 两树相同只是巧合（该文件在 2026-09-21 后未再生成），不能当作安全依据。
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 Select-String -Path tools\*.py -Pattern "daguan-cxy-local"
-node -e "const fs=require('fs');console.log(JSON.parse(fs.readFileSync('F:/ai/daguan-cxy-local/web/data/manifest.json','utf8')).total)"
+node -e "const fs=require('fs');console.log(JSON.parse(fs.readFileSync('<repo-root>/web/data/manifest.json','utf8')).total)"
 ```
 
 **修复建议：** 把硬编码根路径改为「命令行参数 + 环境变量 + 默认当前仓库」三级回退，例如：
@@ -243,7 +243,7 @@ BASE = os.environ.get("DAGUAN_WEB_DATA") or os.path.join(
 
 并在脚本启动时打印解析出的绝对路径，避免再次静默指向错树。`merge_luna_tags.py` 的 `LUNA` 同理改成参数。
 
-**验证方式：** 修复后 `Select-String -Path tools\*.py -Pattern "daguan-cxy-local"` 应无输出；脚本启动日志打印的路径应为 `F:\AI\大观园本地\web\data`。
+**验证方式：** 修复后 `Select-String -Path tools\*.py -Pattern "daguan-cxy-local"` 应无输出；脚本启动日志打印的路径应为 `<canonical-repo-root>\web\data`。
 
 ---
 
@@ -295,7 +295,7 @@ BASE = os.environ.get("DAGUAN_WEB_DATA") or os.path.join(
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/manifest.json','utf8'));const by={};for(const[n,s]of Object.entries(m.shards))for(const q of JSON.parse(fs.readFileSync('web/data/'+s.file,'utf8'))){const k=(q.stem||'').replace(/\s+/g,'')+'|'+JSON.stringify((q.options||[]).map(o=>o.content_md));if(by[k])console.log('DUP',by[k][0],by[k][1],'<->',q.id,n);else by[k]=[q.id,n]}"
 ```
 
@@ -367,7 +367,7 @@ node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/man
 
 **复现：**
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/manifest.json','utf8'));const ids=new Set();for(const s of Object.values(m.shards))for(const q of JSON.parse(fs.readFileSync('web/data/'+s.file,'utf8')))ids.add(String(q.id));const a=JSON.parse(fs.readFileSync('web/data/annotations.json','utf8'));const k=Object.keys(a.annotations);console.log('条目',k.length,'陈旧',k.filter(i=>!ids.has(i)).length,'无标注',[...ids].filter(i=>!k.includes(i)).length)"
 ```
 
@@ -532,7 +532,7 @@ node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/man
 ### 3.1 `npm run verify`（→ `node tools/verify-web-data.mjs`）
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 npm run verify
 ```
 
@@ -548,7 +548,7 @@ npm run verify
 ### 3.2 数据相关测试
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node --test test/web-sync.test.mjs test/official-orphan-classifications.test.mjs test/question-bank-updater.test.mjs
 ```
 
@@ -572,7 +572,7 @@ node --test test/web-sync.test.mjs test/official-orphan-classifications.test.mjs
 ### 3.3 git 状态（审计前确认）
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 git status --short --branch
 ```
 
@@ -585,7 +585,7 @@ HEAD = `126266d`，工作树**无已跟踪文件被修改**，25 个未跟踪文
 ### 3.4 分片对账
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('web/data/manifest.json','utf8'));const disk=fs.readdirSync('web/data/shards').filter(f=>f.endsWith('.json'));console.log('declared',Object.values(m.shards).map(s=>s.file.split('/').pop()).sort());console.log('disk',disk.sort())"
 ```
 
@@ -597,7 +597,7 @@ disk     [ '历年真题.json', '未分类.json', '概率统计.json', '模拟�
 ### 3.5 空选项选择题
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const q=JSON.parse(require('fs').readFileSync('web/data/shards/概率统计.json','utf8')).filter(x=>x.type!=='subjective'&&(!x.options||!x.options.length));console.log('count',q.length);console.log(q.map(x=>x.id+': '+x.answer).slice(0,8).join('\n'))"
 ```
 
@@ -614,7 +614,7 @@ count 25
 ### 3.6 缺图清单
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const D='web/data/';const m=JSON.parse(fs.readFileSync(D+'manifest.json','utf8'));const disk=new Set(fs.readdirSync(D+'assets').filter(f=>f.endsWith('.png')).map(f=>f.replace('.png','')));const refs=new Map();for(const[n,meta]of Object.entries(m.shards))for(const q of JSON.parse(fs.readFileSync(D+meta.file,'utf8')))for(const mm of JSON.stringify(q).matchAll(/(?:assets\/|question-assets\/)([0-9a-fA-F]{64})(?:\.png)?/g)){if(!refs.has(mm[1]))refs.set(mm[1],[]);refs.get(mm[1]).push(q.id+'@'+n)}console.log('引用hash',refs.size,'缺失',[...refs.keys()].filter(h=>!disk.has(h)).length,'磁盘png',disk.size,'无引用',[...disk].filter(h=>!refs.has(h)).length)"
 ```
 
@@ -625,7 +625,7 @@ node -e "const fs=require('fs');const D='web/data/';const m=JSON.parse(fs.readFi
 ### 3.7 索引一致性
 
 ```powershell
-cd "F:\AI\大观园本地"
+cd "<canonical-repo-root>"
 node -e "const fs=require('fs');const D='web/data/';const cq=JSON.parse(fs.readFileSync(D+'category_questions.json','utf8'));const cat=JSON.parse(fs.readFileSync(D+'categories.json','utf8'));const m=JSON.parse(fs.readFileSync(D+'manifest.json','utf8'));const ids=new Set();for(const s of Object.values(m.shards))for(const q of JSON.parse(fs.readFileSync(D+s.file,'utf8')))ids.add(String(q.id));const idIdx=JSON.parse(fs.readFileSync(D+'id_index.json','utf8'));const si=JSON.parse(fs.readFileSync(D+'search_index.json','utf8'));console.log('题库',ids.size,'id_index',Object.keys(idIdx).length,'search_index',si.length);console.log('category_questions 键',Object.keys(cq).length,'引用总数',Object.values(cq).reduce((a,b)=>a+b.length,0),'orphan',(cq.orphan||[]).length)"
 ```
 
@@ -637,9 +637,9 @@ category_questions 键 1077 引用总数 36103 orphan 0
 ### 3.8 陈旧 checkout 确认
 
 ```powershell
-cd "F:\AI\大观园本地"
-Test-Path "F:\ai\daguan-cxy-local\web\data"          # → True
-node -e "const fs=require('fs');console.log(JSON.parse(fs.readFileSync('F:/ai/daguan-cxy-local/web/data/manifest.json','utf8')).total)"   # → 6342
+cd "<canonical-repo-root>"
+Test-Path "<repo-root>\web\data"          # → True
+node -e "const fs=require('fs');console.log(JSON.parse(fs.readFileSync('<repo-root>/web/data/manifest.json','utf8')).total)"   # → 6342
 ```
 
 ### 3.9 Python 工具环境
@@ -680,7 +680,7 @@ python -c "import ast,sys;print(sys.version)"
    这是唯一直接影响用户作答的缺陷。短期手工修 `mzlj-probability.json`（拆选项、补 `correct_labels`、把 `99000017`/`99000020` 改成 `multiple_choice`），长期在 `shared/local-question-banks.mjs` 合并循环里加与 `official-question-bank.mjs:140-142` 同款的形状校验，堵住 overlay 绕过校验的缺口。
 
 3. **把 `tools/*.py` 的硬编码路径改成「参数 / 环境变量 / 仓库相对路径」三级回退，并启动时打印解析结果。**
-   4 个脚本现在全部静默指向 6342 题的陈旧树 `F:/ai/daguan-cxy-local`，是当前最容易被误触发的「静默错树」风险；改动小、收益立竿见影。
+   4 个脚本现在全部静默指向 6342 题的陈旧树 `<repo-root>`，是当前最容易被误触发的「静默错树」风险；改动小、收益立竿见影。
 
 4. **补齐 41 张缺图，并把「缺图数 > 0」在发布流程中升级为失败。**
    用 `DAGUAN_ASSET_TOKEN` 跑一次同步即可；配套把 `verify-web-data.mjs:82-86` 的 warn 加 `--strict` 开关，避免下次再悄悄发布缺图版本。

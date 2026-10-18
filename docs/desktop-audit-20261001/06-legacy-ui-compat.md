@@ -1,6 +1,6 @@
 # 06 · 旧版界面与新旧兼容层审查（只读）
 
-- 审查对象：`F:\AI\大观园本地`（正本 checkout，分支 `main`，HEAD=`126266d`，package.json v1.0.10）
+- 审查对象：`<canonical-repo-root>`（正本 checkout，分支 `main`，HEAD=`126266d`，package.json v1.0.10）
 - 审查日期：2026-10-01
 - 审查性质：**只读**。未修改/删除/移动/重命名任何仓库源码，未执行 `git reset/clean/stash`，未推送。
 - 本次唯一写入：本文件。
@@ -142,7 +142,7 @@ await page.route('**/api/state/events', route => route.abort());
 **复现**：
 
 ```powershell
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 node --test test/font-scale-browser.test.mjs
 ```
 
@@ -341,7 +341,7 @@ node --test test/dual-ui.test.mjs test/new-ui-compat.test.mjs test/ui-contract.t
 → tests 106 / pass 106 / fail 0 / cancelled 0 / skipped 0 / duration_ms 477
 
 # 2) 旧版/兼容相关浏览器测试（需 DAGUAN_PLAYWRIGHT_MODULE）
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 node --test test/choice-ui-browser.test.mjs test/font-scale-browser.test.mjs test/study-report-browser.test.mjs test/visibility-browser.test.mjs
 → exit=1
    choice-ui-browser    14/14 pass（含 old single/old multi 全链路、500/409 重试、离线补同步）

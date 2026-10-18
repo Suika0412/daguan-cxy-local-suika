@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """把 luna 线代题库（Evan26Ma/liner-algebra-kaoyan-daguan）的 classification 标注
 按题目匹配合并进本地 annotations.json，并生成 luna 式分面计数表。"""
-import json, glob, re, io, difflib, collections
+import json, glob, os, re, io, difflib, collections
 
-LUNA = r"C:/Users/14666/AppData/Local/Temp/luna-bank/answers/linear-algebra-7/chapters"
-DATA = r"F:/ai/daguan-cxy-local/web/data"
+def _require_dir(env_name, what):
+    """按环境变量取目录并校验；缺失或非目录时显式退出，不回退旧路径。"""
+    raw = (os.environ.get(env_name) or "").strip()
+    if not raw:
+        raise SystemExit(f"缺少{what}：请设置环境变量 {env_name}")
+    path = os.path.abspath(raw)
+    if not os.path.isdir(path):
+        raise SystemExit(f"{what}不存在或不是目录：{env_name}={path}")
+    return path
+
+LUNA = _require_dir("DAGUAN_LUNA_DIR", "luna 题库目录")
+DATA = _require_dir("DAGUAN_DATA_DIR", "题库数据目录")
 
 def norm(s):
     return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]", "", str(s or ""))

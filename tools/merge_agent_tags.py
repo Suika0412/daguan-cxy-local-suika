@@ -1,13 +1,26 @@
 # -*- coding: utf-8 -*-
 """把子代理标注结果（out/c*.json）合并进 annotations.json，并重建分面计数。"""
-import json, glob, io, collections
+import json, glob, os, io, collections
 
-DATA = r"F:/ai/daguan-cxy-local/web/data"
+def _require_dir(env_name, what):
+    """按环境变量取目录并校验；缺失或非目录时显式退出，不回退旧路径。"""
+    raw = (os.environ.get(env_name) or "").strip()
+    if not raw:
+        raise SystemExit(f"缺少{what}：请设置环境变量 {env_name}")
+    path = os.path.abspath(raw)
+    if not os.path.isdir(path):
+        raise SystemExit(f"{what}不存在或不是目录：{env_name}={path}")
+    return path
+
+DATA = _require_dir("DAGUAN_DATA_DIR", "题库数据目录")
+OUT_DIR = os.path.join(_require_dir("DAGUAN_TAGGER_OUT", "标注产物根目录"), "out")
+if not os.path.isdir(OUT_DIR):
+    raise SystemExit(f"标注结果目录不存在：{OUT_DIR}")
 
 A = json.load(io.open(DATA + "/annotations.json", encoding="utf-8"))
 ann = A["annotations"]
 
-outs = sorted(glob.glob(r"F:/ai/daguan-cxy-local/tools/tagger-out/out/c*.json"))
+outs = sorted(glob.glob(os.path.join(OUT_DIR, "c*.json")))
 print("output files:", len(outs))
 merged = 0
 diff_counter = collections.Counter()

@@ -1,7 +1,7 @@
 # 阶段 2：Electron 桌面窗口报告
 
 日期：2026-09-27
-工作区：`F:\AI\daguan-desktop-stage0-worktree`
+工作区：`<stage-worktree>`
 分支：`codex/daguan-desktop-stage0`
 
 本阶段实现 Electron + Electron Forge 桌面窗口和本地服务连接，未进入迁移、安装器、自动更新或发布。数据验证均使用 `%TEMP%` 下自动生成的隔离目录；没有读取或写入原仓库个人数据。
@@ -11,7 +11,7 @@
 完整自动测试：
 
 ```powershell
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 $env:DAGUAN_TEST_BROWSER='C:\Program Files\Google\Chrome\Application\chrome.exe'
 npm test
 ```
@@ -38,7 +38,7 @@ $env:DAGUAN_USER_DATA_DIR = Join-Path $env:TEMP 'daguan-desktop-stage2-profile6'
 
 ```powershell
 $env:DAGUAN_DATA_DIR = Join-Path $env:TEMP 'daguan-desktop-stage2-smoke6'
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 $env:DAGUAN_TEST_BROWSER='C:\Program Files\Google\Chrome\Application\chrome.exe'
 node test/desktop-cdp-smoke.mjs
 ```
@@ -48,7 +48,7 @@ node test/desktop-cdp-smoke.mjs
 浏览器服务先启动的顺序、稳定根入口、托盘隐藏和服务归属使用以下独立生命周期脚本测试：
 
 ```powershell
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 node test/desktop-lifecycle-smoke.mjs
 ```
 
@@ -113,7 +113,7 @@ Electron 主进程只给 `daguan://app` 的 HTML 响应附加 CSP：默认及脚
 自动安全测试增加 CSP 指令、无 `unsafe-eval`、桌面 HTML 都使用 CSP，以及入口 bootstrap/事件绑定检查。真实 Electron Playwright/CDP 验证命令：
 
 ```powershell
-$env:DAGUAN_PLAYWRIGHT_MODULE='C:\Users\14666\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js'
+$env:DAGUAN_PLAYWRIGHT_MODULE="$env:USERPROFILE\AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver\package\index.js"
 $env:DAGUAN_CDP_ENDPOINT='http://127.0.0.1:9225'
 node test/desktop-csp-smoke.mjs
 ```

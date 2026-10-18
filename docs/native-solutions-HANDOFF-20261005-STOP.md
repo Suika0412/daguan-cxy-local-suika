@@ -8,7 +8,7 @@
 
 - 原始任务与历史交接：`docs/native-solutions-HANDOFF-20261005.md`。
 - 本文是原交接之后的续接增量；冲突时以本文描述的停止状态及对应实际文件为准。
-- 项目：`F:/AI/大观园本地`，本轮已知分支 `main`，HEAD `3d407d593e29a0637fcf658416257e90e85eef9d`，大量既有脏改动。
+- 项目：`<canonical-repo-root>`，本轮已知分支 `main`，HEAD `3d407d593e29a0637fcf658416257e90e85eef9d`，大量既有脏改动。
 - 私有根目录，以下称 **R**：`F:/AI/tmp/daguan-native-pi-resume-20261005`。
 - 历史私有目录：`F:/AI/tmp/daguan-native-rematch-20261004`。
 - 当前内容契约：`shared/native-solutions.mjs`。
@@ -275,12 +275,12 @@ R/parent-inspection/partial-parent-inspection.json
 Native runtime 收据目录：
 
 ```text
-F:/C盘清理迁移/Temp/pi-subagents-user-14666/async-subagent-runs/<runId>/
+<private-worker-root>/Temp/pi-subagents-user-<id>/async-subagent-runs/<runId>/
 ```
 
 历史运行时 blocker仍未彻底查因：`0xC0000409` native runner启动崩溃（run `18e5dfe4-1f7a-489f-977d-f85ef2eab60c`）；后续 max wave可完成不意味着根因已修。更多历史截断/receipt错误见原交接和 `R/max-wave/`。
 
-模型配置本轮曾只为 Flash 增加 `input: ["text","image"]`，位于 `F:/AI/pi-agent/agent/models.json`，备份 `R/models-before-flash-vision.json`。实际图片附件探针通过；不表示手写 OCR 可以放心自动转录。不要公开完整配置或凭据。
+模型配置本轮曾只为 Flash 增加 `input: ["text","image"]`，位于 `<agent-tools>/agent/models.json`，备份 `R/models-before-flash-vision.json`。实际图片附件探针通过；不表示手写 OCR 可以放心自动转录。不要公开完整配置或凭据。
 
 ## 9. 改动与恢复位置
 

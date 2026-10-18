@@ -1,6 +1,6 @@
 # 03 · 本地服务与数据持久化层 只读审查报告
 
-- 审查对象：`F:\AI\大观园本地`（正本 checkout，分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，package `daguan-math-local` v1.0.10）
+- 审查对象：`<canonical-repo-root>`（正本 checkout，分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，package `daguan-math-local` v1.0.10）
 - 范围：`local-server/`（server.mjs 41009B / ai-service.mjs 24007B / sync-format.mjs 20289B / official-question-bank.mjs 17225B / cxyonly-client.mjs 9280B / instance-lock.mjs 7563B / question-bank-updater.mjs 5169B / store.mjs 4237B / visit-history.mjs 4027B / study-activity.mjs 10050B / catalog.mjs 2893B）+ `desktop/electron-main.cjs` 的服务托管部分
 - 环境：Node v24.15.0 / PowerShell 7 / Windows
 - 实验隔离：`DAGUAN_DATA_DIR=%TEMP%\dg-audit-03`（全新临时目录），端口 18081，未读写 `%LOCALAPPDATA%\DaguanMath\data` 与仓库 `data/`
@@ -69,9 +69,9 @@ node:_http_server:365
           ^
 Error [ERR_HTTP_HEADERS_SENT]: Cannot write headers after they are sent to the client
     at ServerResponse.writeHead (node:_http_server:365:11)
-    at json (file:///F:/AI/大观园本地/local-server/server.mjs:47:7)
-    at errorJson (file:///F:/AI/大观园本地/local-server/server.mjs:53:3)
-    at file:///F:/AI/大观园本地/local-server/server.mjs:645:36 {
+    at json (file:///<canonical-repo-root>/local-server/server.mjs:47:7)
+    at errorJson (file:///<canonical-repo-root>/local-server/server.mjs:53:3)
+    at file:///<canonical-repo-root>/local-server/server.mjs:645:36 {
   code: 'ERR_HTTP_HEADERS_SENT'
 }
 Node.js v24.15.0
@@ -345,7 +345,7 @@ PUT /api/state  body=11MB                    -> 500 {"ok":false,"code":null,"err
 ```
 ✖ test\ai-service.test.mjs:71 无模型可保存并获取列表，旧档案默认流式，Key 留空保留
   AssertionError: + actual 'sk-secret-key' - expected 'test-only-key'
-  at TestContext.<anonymous> (file:///F:/AI/大观园本地/test/ai-service.test.mjs:80:10)
+  at TestContext.<anonymous> (file:///<canonical-repo-root>/test/ai-service.test.mjs:80:10)
 ℹ tests 50 / pass 49 / fail 1 / skipped 0 / duration_ms 15325
 ```
 
@@ -388,7 +388,7 @@ PUT /api/state  body=11MB                    -> 500 {"ok":false,"code":null,"err
 命令（隔离目录，含 9 个必跑文件）：
 
 ```powershell
-cd 'F:\AI\大观园本地'; $env:DAGUAN_DATA_DIR="$env:TEMP\dg-audit-03-tests"
+cd '<canonical-repo-root>'; $env:DAGUAN_DATA_DIR="$env:TEMP\dg-audit-03-tests"
 node --test test/local-server.test.mjs test/service-instance.test.mjs test/backup-migration.test.mjs `
   test/question-bank-updater.test.mjs test/official-orphan-classifications.test.mjs `
   test/visit-history.test.mjs test/runtime-stop.test.mjs test/ai-service.test.mjs test/study-activity.test.mjs

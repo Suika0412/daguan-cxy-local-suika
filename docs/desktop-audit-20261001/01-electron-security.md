@@ -1,7 +1,7 @@
 # 01 · Electron 桌面版安全与主进程审查
 
 - 审查对象：大观园数学 Windows 桌面版（package name `daguan-math-local`，产品名「大观园数学」）
-- 正本 checkout：`F:\AI\大观园本地`，分支 `main`，HEAD `126266d`，版本 v1.0.10
+- 正本 checkout：`<canonical-repo-root>`，分支 `main`，HEAD `126266d`，版本 v1.0.10
 - Electron 版本：`44.4.5`（`node_modules/electron/package.json`）
 - 审查方式：**只读**代码审查 + 本机可复现实验（临时数据目录 + 临时 Electron 探针），未修改任何仓库源码
 - 报告日期：2026-10-01
@@ -670,7 +670,7 @@ env = { ...process.env, HOME: privateHome, USERPROFILE: privateHome, ...(token ?
 ### T1 · 官方相关测试（本机实跑）
 
 ```
-cd 'F:\AI\大观园本地'; node --test test/electron-security.test.mjs test/desktop-package.test.mjs
+cd '<canonical-repo-root>'; node --test test/electron-security.test.mjs test/desktop-package.test.mjs
 ```
 
 ```
@@ -690,7 +690,7 @@ cd 'F:\AI\大观园本地'; node --test test/electron-security.test.mjs test/des
 ```
 $dir = "$env:TEMP\dg-audit-01"; $env:DAGUAN_DATA_DIR=$dir; $env:PORT='18080';
 $env:DAGUAN_OPEN_BROWSER='0'; $env:DAGUAN_LAUNCHER_KIND='browser'; $env:DAGUAN_DEFAULT_PAGE='/index.html'
-Start-Process node 'local-server/server.mjs' -WorkingDirectory 'F:\AI\大观园本地'
+Start-Process node 'local-server/server.mjs' -WorkingDirectory '<canonical-repo-root>'
 ```
 
 stdout：
@@ -745,14 +745,14 @@ C4  GET  /api/state
 探针：`%TEMP%\dg-audit-electron-01\main.cjs`（只读引用仓库文件，不改动仓库）
 
 ```
-& 'F:\AI\大观园本地\node_modules\electron\dist\electron.exe' "$env:TEMP\dg-audit-electron-01\main.cjs"
+& '<canonical-repo-root>\node_modules\electron\dist\electron.exe' "$env:TEMP\dg-audit-electron-01\main.cjs"
 ```
 
 无权限 handler（= 应用实际状态）：
 
 ```json
 {
-  "prefs": { "preload": "F:\\AI\\大观园本地\\desktop\\preload.cjs", "nodeIntegration": false,
+  "prefs": { "preload": "<canonical-repo-root>\\desktop\\preload.cjs", "nodeIntegration": false,
              "contextIsolation": true, "sandbox": true, "webSecurity": true },
   "result": {
     "require": "undefined", "process": "undefined", "module": "undefined", "globalThis_process": "undefined",
@@ -885,7 +885,7 @@ F-13 是这份报告里所有 P2/P3 能长期存活的土壤。建议：
 
 ## 附录 · 审查产物与临时文件位置
 
-- 报告：`F:\AI\大观园本地\docs\desktop-audit-20261001\01-electron-security.md`（本文件）
+- 报告：`<canonical-repo-root>\docs\desktop-audit-20261001\01-electron-security.md`（本文件）
 - Electron 探针脚本（临时目录，非仓库）：`%TEMP%\dg-audit-electron-01\main.cjs`、`main2.cjs`、`main3.cjs`
 - 跨源探测用的临时数据目录：`%TEMP%\dg-audit-01`（内含本次探测写入的 `state.json` 等，与真实用户数据无关；残留一个指向已退出 PID 的 `.service-instance.json`，无害）
 - **本次审查启动的进程均已退出**：`node local-server/server.mjs`（PID 37048）已 `Stop-Process -Force` 并确认端口 18080 无监听；探针 Electron 进程由脚本自身 `app.quit()` 结束，复查 `Get-Process electron` 为空。

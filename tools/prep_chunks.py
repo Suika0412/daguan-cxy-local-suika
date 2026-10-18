@@ -2,8 +2,18 @@
 """把高数/概率题库切成标注任务分片，供子代理逐题标注。"""
 import json, glob, os, io, re
 
-DATA = r"F:/ai/daguan-cxy-local/web/data"
-OUT = r"F:/ai/daguan-cxy-local/tools/tagger-out/chunks"
+def _require_dir(env_name, what):
+    """按环境变量取目录并校验；缺失或非目录时显式退出，不回退旧路径。"""
+    raw = (os.environ.get(env_name) or "").strip()
+    if not raw:
+        raise SystemExit(f"缺少{what}：请设置环境变量 {env_name}")
+    path = os.path.abspath(raw)
+    if not os.path.isdir(path):
+        raise SystemExit(f"{what}不存在或不是目录：{env_name}={path}")
+    return path
+
+DATA = _require_dir("DAGUAN_DATA_DIR", "题库数据目录")
+OUT = os.path.join(_require_dir("DAGUAN_TAGGER_OUT", "标注产物根目录"), "chunks")
 os.makedirs(OUT, exist_ok=True)
 
 ann = json.load(io.open(DATA + "/annotations.json", encoding="utf-8"))["annotations"]

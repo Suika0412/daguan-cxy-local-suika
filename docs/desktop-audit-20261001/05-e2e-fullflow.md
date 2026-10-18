@@ -1,7 +1,7 @@
 # 大观园数学 桌面版 — 端到端全流程实测报告
 
 - 审计日期：2026-10-01
-- 工作目录：`F:\AI\大观园本地`（正本 checkout，分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，版本 **1.0.10**）
+- 工作目录：`<canonical-repo-root>`（正本 checkout，分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，版本 **1.0.10**）
 - 运行环境：Windows，Node **v24.15.0**，npm **11.12.1**，Electron **v24.21.0**（内嵌 Chrome/152.0.7977.130、Electron/44.4.5）
 - 隔离措施：所有服务/桌面进程均在 `DAGUAN_DATA_DIR=%TEMP%\dg-e2e-20261001\...` 下运行，端口 **18083–18087**。**全程未读写真实 `%LOCALAPPDATA%\DaguanMath\data`**（该目录的 `state.json` mtime 为 2026-10-01 10:47、锁文件 mtime 为 09:00，均早于本次实测开始时间 12:40）。
 - 只读约束：未修改/删除/移动/重命名任何仓库源码；未执行 `git reset/clean/stash`；未推送部署。仓库 `git status` 最终为 0 个已跟踪文件被改。
@@ -57,9 +57,9 @@
             ^
   Error [ERR_HTTP_HEADERS_SENT]: Cannot write headers after they are sent to the client
       at ServerResponse.writeHead (node:_http_server:365:11)
-      at json (file:///F:/AI/%E5%A4%A7%E8%A7%82%E5%9B%AD%E6%9C%AC%E5%9C%B0/local-server/server.mjs:47:7)
-      at errorJson (file:///F:/AI/%E5%A4%A7%E8%A7%82%E5%9B%AD%E6%9C%AC%E5%9C%B0/local-server/server.mjs:53:3)
-      at file:///F:/AI/%E5%A4%A7%E8%A7%82%E5%9B%AD%E6%9C%AC%E5%9C%B0/local-server/server.mjs:645:36 {
+      at json (file:///<canonical-repo-root>/local-server/server.mjs:47:7)
+      at errorJson (file:///<canonical-repo-root>/local-server/server.mjs:53:3)
+      at file:///<canonical-repo-root>/local-server/server.mjs:645:36 {
     code: 'ERR_HTTP_HEADERS_SENT'
   }
   ```
@@ -159,7 +159,7 @@
   + actual - expected
   + 'sk-secret-key'
   - 'test-only-key'
-      at TestContext.<anonymous> (file:///F:/AI/%E5%A4%A7%E8%A7%82%E5%9B%AD%E6%9C%AC%E5%9C%B0/test/ai-service.test.mjs:80:10)
+      at TestContext.<anonymous> (file:///<canonical-repo-root>/test/ai-service.test.mjs:80:10)
   ```
 - **复现步骤**：
   1. `$env:DAGUAN_DATA_DIR="$env:TEMP\some-fresh-dir"`
@@ -241,7 +241,7 @@
 ### A. 环境与静态基线
 
 ```powershell
-cd 'F:\AI\大观园本地'
+cd '<canonical-repo-root>'
 git status --short --branch
 ```
 ```

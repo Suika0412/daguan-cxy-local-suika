@@ -1,6 +1,6 @@
 # 09 · 同步扩展 / 远程访问 / 官网集成 审查报告
 
-- 审查对象：`F:\AI\大观园本地`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
+- 审查对象：`<canonical-repo-root>`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
 - 审查日期：2026-10-01
 - 审查性质：**只读诊断**。未修改、未删除、未重命名任何仓库源码；未执行 `git reset`/`clean`/`stash`；未推送、未部署、未发布。唯一写入产物是本报告。
 - 环境：Windows，Node v24.15.0，npm 11.12.1
@@ -536,7 +536,7 @@ test/web-sync.test.mjs:32:  "3": { mastery: "learning",  updated_at: 17200000020
 ### 6.1 git status 复查（审查结束后）
 
 ```
-$ cd F:\AI\大观园本地 && git status --short --branch
+$ cd <canonical-repo-root> && git status --short --branch
 ## main...origin/main
 ?? .zcodeignore
 ?? AGENTS.md
@@ -576,13 +576,13 @@ $ git rev-parse HEAD
 
 ### 6.2 临时数据目录
 
-- 唯一使用：`C:\Users\14666\AppData\Local\Temp\dg-audit-09\data`
+- 唯一使用：`<WINDOWS_USER>\AppData\Local\Temp\dg-audit-09\data`
 - 该目录内生成的文件（全部由本次审查产生，非仓库内）：
   - `state.json`（663 B）
   - `.service-instance.json`（235 B）
   - `study-activity.json`（137 B）
   - `cxyonly-backups/`（空）、`ai-history/`（空）
-- 探针脚本：`C:\Users\14666\AppData\Local\Temp\dg-audit-09\gw-probe.cjs`（3,701 B）、`gw-probe-auth.json`（269 B）
+- 探针脚本：`<WINDOWS_USER>\AppData\Local\Temp\dg-audit-09\gw-probe.cjs`（3,701 B）、`gw-probe-auth.json`（269 B）
 - **真实 `%LOCALAPPDATA%\DaguanMath\data` 全程未被读取或写入**。真实桌面版服务（pid 6196 / port 5502）自始至终未收到任何请求，其锁文件未被触碰。
 
 ### 6.3 已退出进程清单

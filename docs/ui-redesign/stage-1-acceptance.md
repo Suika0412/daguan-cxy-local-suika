@@ -266,7 +266,7 @@ python web/ui-preview/generate-screenshots.py
 **结果：**
 ```
 ✅ 所有截图生成完成！
-📁 保存位置：F:\AI\大观园本地\.build\ui-redesign\stage-1
+📁 保存位置：<canonical-repo-root>\.build\ui-redesign\stage-1
 ```
 
 - ✅ 11 张截图全部生成

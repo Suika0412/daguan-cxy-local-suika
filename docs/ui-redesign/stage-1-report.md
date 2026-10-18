@@ -6,14 +6,14 @@
 
 ## 入口 URL
 
-**主入口：** `file:///F:/AI/大观园本地/web/ui-preview/index.html`
+**主入口：** `file:///<canonical-repo-root>/web/ui-preview/index.html`
 
 **各页面直接访问：**
-- 首页：`file:///F:/AI/大观园本地/web/ui-preview/pages/home.html`
-- 题库：`file:///F:/AI/大观园本地/web/ui-preview/pages/library.html`
-- 做题：`file:///F:/AI/大观园本地/web/ui-preview/pages/question.html`
-- AI 展开：`file:///F:/AI/大观园本地/web/ui-preview/pages/question-with-ai.html`
-- 手机导航：`file:///F:/AI/大观园本地/web/ui-preview/pages/mobile-nav.html`
+- 首页：`file:///<canonical-repo-root>/web/ui-preview/pages/home.html`
+- 题库：`file:///<canonical-repo-root>/web/ui-preview/pages/library.html`
+- 做题：`file:///<canonical-repo-root>/web/ui-preview/pages/question.html`
+- AI 展开：`file:///<canonical-repo-root>/web/ui-preview/pages/question-with-ai.html`
+- 手机导航：`file:///<canonical-repo-root>/web/ui-preview/pages/mobile-nav.html`
 
 ## 使用的题目样本
 

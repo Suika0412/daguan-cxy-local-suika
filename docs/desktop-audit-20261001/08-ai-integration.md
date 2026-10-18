@@ -1,6 +1,6 @@
 # 08 · AI 问答功能与外部服务集成审查
 
-- 审查对象：`F:\AI\大观园本地`（分支 `main`，HEAD `126266d`，package version v1.0.10）
+- 审查对象：`<canonical-repo-root>`（分支 `main`，HEAD `126266d`，package version v1.0.10）
 - 审查范围：`local-server/ai-service.mjs`、`local-server/cxyonly-client.mjs`、`local-server/server.mjs` AI 路由、`web/ai-settings.js`、`web/ai-panel-layout.js`、`web/ai-reading.js`、`web/ai-services.css`、AI 相关渲染路径、`desktop/policy.mjs` / `desktop/preload.cjs` / `desktop/electron-main.cjs`
 - 审查方式：只读代码审查 + 临时数据目录起本地服务实测 + 本地假上游（fake upstream）行为探针 + 真实 `node --test`
 - 时间：2026-10-01
@@ -273,8 +273,8 @@ if (process.platform !== "win32") await fs.chmod(file, mode);
 目录 ACL（`(Get-Acl $dir).Access`）：
 
 ```
-LAPTOP-4HH5HER9\CodexSandboxUsers  Modify
-LAPTOP-4HH5HER9\14666              FullControl
+<HOST>\CodexSandboxUsers  Modify
+<HOST>\<USER>              FullControl
 NT AUTHORITY\SYSTEM                FullControl
 BUILTIN\Administrators             FullControl
 ```
@@ -755,8 +755,8 @@ $ Get-Content "$env:TEMP\dg-audit-08\ai-profiles.json"
 { "version": 1, "profiles": [ { ..., "key": "sk-csrf-probe-key", ... } ] }     ← 明文
 
 $ (Get-Acl "$env:TEMP\dg-audit-08").Access
-LAPTOP-4HH5HER9\CodexSandboxUsers  Modify
-LAPTOP-4HH5HER9\14666              FullControl
+<HOST>\CodexSandboxUsers  Modify
+<HOST>\<USER>              FullControl
 NT AUTHORITY\SYSTEM                FullControl
 BUILTIN\Administrators             FullControl
 ```

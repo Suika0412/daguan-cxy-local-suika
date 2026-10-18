@@ -2,7 +2,7 @@
 
 本项目按维护者要求使用完整 Codex Review。Codex 负责规划、allowed files、validation、调度、结果回收、diff 审计、冲突处理、修复、最终测试和验收；ZCode 只实现 packet。worker 的 success 永远停在 awaiting_review。
 
-ZCode worker 默认以无头 CLI 形式运行：通过 `scripts/zcode-env.py` 调用 ZCode-supervisor，再使用已安装客户端附带的 `F:\Tools\ZCode\resources\glm\zcode.cjs`。执行在后台进行，日志、结果和 diff 自动回收；每个 worker 使用独立 workspace、HOME 与运行目录。除用户明确要求客户端交互外，不启动 ZCode 桌面窗口。16 是本地最大并发数，实际启动数量按可独立任务数和服务端允许并发确定。
+ZCode worker 默认以无头 CLI 形式运行：通过 `scripts/zcode-env.py` 调用 ZCode-supervisor，再使用已安装客户端附带的 `<zcode-app>\resources\glm\zcode.cjs`。执行在后台进行，日志、结果和 diff 自动回收；每个 worker 使用独立 workspace、HOME 与运行目录。除用户明确要求客户端交互外，不启动 ZCode 桌面窗口。16 是本地最大并发数，实际启动数量按可独立任务数和服务端允许并发确定。
 
 ## 开发入口
 
@@ -85,7 +85,7 @@ python test/zcode-pool.test.py
 python scripts/zcode-pool.py run --manifest .codex/zcode-smoke.json
 ```
 
-`F:\AI\zcode-launchers` 中提供同名命令，并已加入用户 PATH；新开的终端可直接用 zcode / zcodectl / zcode-auto-route / zcode-install-repo。当前窗口也可用上述 repo launcher。上游 installer 已实际运行，写入 `.codex/zcode-routing.json`、本文、`.agents/mcp.json` 与 AGENTS 路由入口。再次运行不加 --force，避免覆盖项目的并行规则。
+`<zcode-launchers>` 中提供同名命令，并已加入用户 PATH；新开的终端可直接用 zcode / zcodectl / zcode-auto-route / zcode-install-repo。当前窗口也可用上述 repo launcher。上游 installer 已实际运行，写入 `.codex/zcode-routing.json`、本文、`.agents/mcp.json` 与 AGENTS 路由入口。再次运行不加 --force，避免覆盖项目的并行规则。
 
 按用户明确授权，concurrency 和 account_concurrency 均设置为 16，多个 batch 共享这一账号本地调度上限。服务端实际限制仍优先；并发、额度或 provider 错误触发原有暂停派发与退避机制，不轮换账号或绕过限制。本地 16-worker 调度与锁测试仅验证本地机制；当前两个真实 worker 的 smoke 不能作为真实 16-worker 账号压力验证。
 

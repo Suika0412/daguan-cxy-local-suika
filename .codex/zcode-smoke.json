@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source": "F:/AI/大观园本地",
+  "source": ".",
   "isolation": "fixture",
   "tasks": [
     {

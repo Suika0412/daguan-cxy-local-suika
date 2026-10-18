@@ -1,6 +1,6 @@
 # 大观园数学 · 桌面版前端 UI/UX 只读审查报告
 
-- 审查对象：`F:\AI\大观园本地`（正本 checkout，分支 `main`，HEAD `126266d fix: constrain answer reveal scrolling to question content`，package.json v1.0.10）
+- 审查对象：`<canonical-repo-root>`（正本 checkout，分支 `main`，HEAD `126266d fix: constrain answer reveal scrolling to question content`，package.json v1.0.10）
 - 审查范围：新版学习界面（`web/index.html` + `web/app-new.js`）与旧版（`web/legacy.html` + `web/app-legacy.js`）的刷题流程、判题、章节导航、答案滚动、字号缩放、学习报告、访问历史、AI 面板、备份迁移、双界面一致性、可访问性、性能、桌面特性
 - 方式：静态阅读 + 真实浏览器（Playwright/Chromium headless）真实点击复现 + 已存在的 UI 测试
 - 审查性质：**只读**。除本报告外未修改、删除、移动、重命名任何仓库文件，未执行 `git reset/clean/stash`，未推送部署
@@ -604,6 +604,6 @@ git log -1 --oneline
 
 ## 附：报告产出说明
 
-- 本报告是本次审查**唯一**的写入产物：`F:\AI\大观园本地\docs\desktop-audit-20261001\04-frontend-ui.md`
+- 本报告是本次审查**唯一**的写入产物：`<canonical-repo-root>\docs\desktop-audit-20261001\04-frontend-ui.md`
 - 未修改、删除、移动、重命名任何仓库文件；未执行 `git reset` / `clean` / `stash`；未推送、未部署
 - 所有服务进程已退出；临时数据目录 `%TEMP%\dg-audit-04\` 按要求保留

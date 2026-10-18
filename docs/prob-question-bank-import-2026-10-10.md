@@ -1,6 +1,6 @@
 # 概率统计题库并入本地题库（prob → 大观园）· 2026-10-10
 
-把新加坡服务器上的 prob 题库（`https://prob.kaoyangogogo.fun`，源码仓库 `/home/ubuntu/kaoyan-baobaoshu-answers`）
+把新加坡服务器上的 prob 题库（`https://prob.kaoyangogogo.fun`，源码仓库 `<remote-repo-root>`）
 整库并入本地题库：补上缺失的「概率统计百宝书」230 题，并修复既有「概率救命课」25 道选择题的选项缺口。
 
 ## 来源与口径

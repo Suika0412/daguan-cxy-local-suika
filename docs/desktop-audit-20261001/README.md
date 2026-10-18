@@ -1,6 +1,6 @@
 # 大观园数学 · 桌面版全流程审计汇总
 
-- 对象：`F:\AI\大观园本地`（分支 `main`，HEAD `126266d`，`daguan-math-local` v1.0.10）
+- 对象：`<canonical-repo-root>`（分支 `main`，HEAD `126266d`，`daguan-math-local` v1.0.10）
 - 日期：2026-10-01　环境：Windows / Node v24.15.0 / Electron 44.4.5
 - 方法：10 个并行审查域 + 主理人独立复现（`00-master-verification.md`）
 - 性质：**只读诊断**。未修改任何仓库源码，未推送、未部署、未发布。全部实测使用临时 `DAGUAN_DATA_DIR`，未读写真实 `%LOCALAPPDATA%\DaguanMath\data`。
@@ -133,7 +133,7 @@
 | P2-23 | `store.mjs:71-77` 的 `writeBackup` 无保留策略；每轮对账至少新增 4 份全量快照（`server.mjs:247-248`、`:303-304`、`:221`） |
 | P2-24 | `applyPull`（`server.mjs:200`）直接 `writeState`，既不取 `withLock` 也不传 `expectedRevision` → 与并发的 `PATCH` 互相覆盖、丢更新 |
 | P2-25 | 官网 token **明文**落盘（`store.mjs:28-34` 的 `mode 0600` 在 Windows 无效），而隧道 token 走 `safeStorage`（`electron-main.cjs:320-322`）→ 同类凭据策略不一致（缓解项：`redactSecrets`、login 只回传 profile、token 不回浏览器，这几点是对的） |
-| P3 | `asar: false`（283MB 明文目录）；打包携带未被引用的题库分片且 `asset_count` 与实际不符；仓库内 `out\make` 是 1.0.8 陈旧产物；文档大面积滞后（README 仍写"公开版 v1.0.3"，CHANGELOG 停在 v1.0.1）；4 个 Python 工具硬编码 `F:/ai/daguan-cxy-local/web/data`（陈旧树 6342 题 vs 正本 6521 题）；41 张题图缺失（`verify` 只 warn 不 fail）；跨分片逐字重复题 2 组；`GET //package.json` 被双斜杠归一化为默认页并返回 200 landing（无害）；`#show-answer-btn` 的 `aria-expanded` 只在判题路径（`web/app-new.js:5697-5698`）被设为 `"true"` 且永不复位；题目页 `h1Count: 0`、`#preview-access-key` 无 label、`dialog#dlg-preview-access` 缺 `aria-modal`；`web/index-new-backup.html` 实测 **HTTP 200 可达**但加载 v90 旧资源（缺 17 个 `defer` 脚本、`window.ChoiceGrading` 为 `undefined`），且 `asar:false` 会随安装包明文发布；旧版 5 处 `window.__f*` 调试全局（`web/app-legacy.js:2111` 泄露响应体前 120 字符）、`web/app-legacy.js:2092` innerHTML 未转义、`legacy.html` 6 个 class 无 CSS 定义、Service Worker 预缓存 430KB 死资产（`web/service-worker.js:20-21` 的 `styles.css`/`app2.js`）、7 处死元素引用（`#setup-feedback` 疑似改名漏改）、`desktop/electron-main.cjs:159` 托盘 `switchUi` 静默返回 false |
+| P3 | `asar: false`（283MB 明文目录）；打包携带未被引用的题库分片且 `asset_count` 与实际不符；仓库内 `out\make` 是 1.0.8 陈旧产物；文档大面积滞后（README 仍写"公开版 v1.0.3"，CHANGELOG 停在 v1.0.1）；4 个 Python 工具硬编码 `<repo-root>/web/data`（陈旧树 6342 题 vs 正本 6521 题）；41 张题图缺失（`verify` 只 warn 不 fail）；跨分片逐字重复题 2 组；`GET //package.json` 被双斜杠归一化为默认页并返回 200 landing（无害）；`#show-answer-btn` 的 `aria-expanded` 只在判题路径（`web/app-new.js:5697-5698`）被设为 `"true"` 且永不复位；题目页 `h1Count: 0`、`#preview-access-key` 无 label、`dialog#dlg-preview-access` 缺 `aria-modal`；`web/index-new-backup.html` 实测 **HTTP 200 可达**但加载 v90 旧资源（缺 17 个 `defer` 脚本、`window.ChoiceGrading` 为 `undefined`），且 `asar:false` 会随安装包明文发布；旧版 5 处 `window.__f*` 调试全局（`web/app-legacy.js:2111` 泄露响应体前 120 字符）、`web/app-legacy.js:2092` innerHTML 未转义、`legacy.html` 6 个 class 无 CSS 定义、Service Worker 预缓存 430KB 死资产（`web/service-worker.js:20-21` 的 `styles.css`/`app2.js`）、7 处死元素引用（`#setup-feedback` 疑似改名漏改）、`desktop/electron-main.cjs:159` 托盘 `switchUi` 静默返回 false |
 | P2-26 | `test/ui-contract.test.mjs` 45 例**全是源码正则**（465 行、26 次 `readFileSync`、读 13 个文件）：改变量名就红（假阴性），行为回归只要字符串还在就绿（假阳性）。用例量全仓第二多，制造"UI 契约已充分测试"的错觉 |
 | P2-27 | `test/chapter-navigation.test.mjs` 名不符实：只 `readFileSync` 两个 data json，自己实现 `children`/`flattenLeaves`/`find` 后断言硬编码 id（`:33` leaves = `[331,344,345,347,346,348]`、`:40` `categoryQuestions["331"].length === 11`）→ **零行导航代码被执行**，P1-M 本可在这里被拦住。建议改名 `catalog-data-integrity.test.mjs` 并另补真导航测试 |
 | P2-28 | `test/download-links.test.mjs` 是文档字符串测试：`:5 const RELEASE = "v1.0.0"` **死变量**；只断言 `docs/release-v1.0.0.md` 与 `.1.md` 的资产名，**v1.0.2–v1.0.10 完全无覆盖** |

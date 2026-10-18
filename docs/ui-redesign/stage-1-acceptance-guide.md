@@ -4,7 +4,7 @@
 
 ### 1. 打开样板入口（1 分钟）
 
-在浏览器中打开：`F:\AI\大观园本地\web\ui-preview\index.html`
+在浏览器中打开：`<canonical-repo-root>\web\ui-preview\index.html`
 
 **预期：** 看到干净的样板导航页，5 个卡片，橙色品牌标识
 

@@ -64,7 +64,7 @@
       "bounded_implementation"
     ]
   },
-  "repo": "F:\\AI\\大观园本地",
+  "repo": ".",
   "routing_mode": "auto",
   "trigger": "For implementation work in this repo, Codex should plan the task, run auto-route, create a bounded packet, run ZCode, then audit and validate the result. Skip ZCode for read-only answers, trivial one-line edits, or when the user says no-zcode.",
   "version": 1,

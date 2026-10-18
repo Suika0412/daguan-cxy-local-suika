@@ -1,7 +1,7 @@
 # 00 · 主理人交叉验证记录（大观园桌面版全流程审计）
 
 - 验证者：主理人（本会话），非子代理
-- 对象：`F:\AI\大观园本地`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
+- 对象：`<canonical-repo-root>`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
 - 环境：Windows / Node v24.15.0 / npm 11.12.1 / 日期 2026-10-01
 - 隔离：所有探针用临时 `DAGUAN_DATA_DIR`（`%TEMP%\dg-main-check\*`），未读写 `%LOCALAPPDATA%\DaguanMath\data` 与仓库 `data/`；未修改任何仓库源码
 - 探针脚本：`%TEMP%\dg-main-check\probe{2,3,5,6,7,9}.mjs`（内容见本文各节）

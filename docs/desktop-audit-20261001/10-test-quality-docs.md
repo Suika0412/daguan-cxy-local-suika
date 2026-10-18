@@ -1,11 +1,11 @@
 # 10 · 测试有效性 / CI / 文档一致性 审查报告（大观园桌面版全流程审计）
 
 - 审查者：第 10 号审查子代理（测试有效性 / CI / 文档一致性）
-- 对象：`F:\AI\大观园本地`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
+- 对象：`<canonical-repo-root>`（分支 `main`，HEAD `126266dfb4a476c6a6f1bbe9e26652ca2c247904`，`daguan-math-local` v1.0.10）
 - 环境：Windows / Node v24.15.0 / npm 11.12.1 / Electron 44.4.5 / 日期 2026-10-01
 - 性质：**只读诊断**。未修改、未删除、未重命名任何仓库源码或文档；未执行 `git reset`/`clean`/`stash`；未推送、未部署、未发布。
 - 隔离：所有测试运行均使用临时 `DAGUAN_DATA_DIR`（`%TEMP%\dg-audit-10\*`）与 `PORT=18088`，**未读写 `%LOCALAPPDATA%\DaguanMath\data`，未读写仓库 `data/`**。
-- 未安装任何新依赖。浏览器测试复用机器上已有的临时 Playwright（`C:\Users\14666\AppData\Local\Temp\dg-audit-04\pw\node_modules\playwright`，playwright 1.59.0）。
+- 未安装任何新依赖。浏览器测试复用机器上已有的临时 Playwright（`<WINDOWS_USER>\AppData\Local\Temp\dg-audit-04\pw\node_modules\playwright`，playwright 1.59.0）。
 - 本文件是本次审查唯一由我写入的文件。
 
 ## 0. 方法与约束
@@ -489,12 +489,12 @@ env 中 `RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}`�
 | 我启动的 node 服务进程 | **0 个残留**（所有 `local-server/server.mjs` 子进程已随测试结束退出） |
 | 我启动的 Playwright Chromium | **0 个残留**（实测筛选 `Path -like '*ms-playwright*'` = 0） |
 | 机器上其它 `chrome.exe` | 26 个，全部是用户自己的 `C:\Program Files\Google\Chrome\Application\chrome.exe`，**未触碰** |
-| 其它 node 进程 | 仅 PID **6496** = `F:\Tools\Node\node.exe C:\Users\14666\.dsh\profiles\desktop\node_modules\billion-context\dist\index.js start --host 127.0.0.1 --port 18787`（DSH 自身服务，非我启动，**未触碰**） |
+| 其它 node 进程 | 仅 PID **6496** = `<node-runtime>\node.exe <WINDOWS_USER>\.dsh\profiles\desktop\node_modules\billion-context\dist\index.js start --host 127.0.0.1 --port 18787`（DSH 自身服务，非我启动，**未触碰**） |
 | 其它审查子代理的进程 | 未发现、未触碰 |
 
 ### 7.4 未安装任何依赖（实测）
 
-浏览器测试复用机器上**已有**的临时 Playwright：`DAGUAN_PLAYWRIGHT_MODULE=C:\Users\14666\AppData\Local\Temp\dg-audit-04\pw\node_modules\playwright`（playwright 1.59.0，由第 4 号子代理此前安装）；Chromium 用 `DAGUAN_CHROMIUM_EXECUTABLE=C:\Users\14666\AppData\Local\ms-playwright\chromium-1243\chrome-win64\chrome.exe`。`node_modules` 未被修改。
+浏览器测试复用机器上**已有**的临时 Playwright：`DAGUAN_PLAYWRIGHT_MODULE=<WINDOWS_USER>\AppData\Local\Temp\dg-audit-04\pw\node_modules\playwright`（playwright 1.59.0，由第 4 号子代理此前安装）；Chromium 用 `DAGUAN_CHROMIUM_EXECUTABLE=<WINDOWS_USER>\AppData\Local\ms-playwright\chromium-1243\chrome-win64\chrome.exe`。`node_modules` 未被修改。
 
 ---
 

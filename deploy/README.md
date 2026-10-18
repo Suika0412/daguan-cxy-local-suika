@@ -20,10 +20,26 @@ bash scripts/install-linux.sh
 
 ### 从 GitHub 自动更新
 
-服务器版可以安装定时更新器。它每 15 分钟检查当前分支的上游 GitHub 分支；只有工作区干净、远端提交可以快进合并，并且新版本通过 `npm test` 和 `npm run verify` 时，才会更新代码并重启服务：
+服务器版可以安装定时更新器。它每 15 分钟检查当前分支的上游 GitHub 分支；只有工作区干净、远端提交可以快进合并，并且新版本通过 `npm test` 和 `npm run verify` 时，才会更新代码并重启服务。
+
+`deploy/daguan-cxy-update.service` 不写死安装路径和用户名，安装前必须提供两个值：
+
+- `DAGUAN_ROOT`：仓库在本机的绝对路径，必须是 `git clone` 出来的工作副本根目录（示例 `/opt/daguan-cxy-local` 仅为示意，请换成你的真实路径）；
+- `DAGUAN_UPDATE_USER`：执行 `git fetch`/`git merge`/测试的账户，该账户必须对仓库目录可写，且与 `scripts/auto-update-linux.sh` 读取的同名环境变量一致（示例 `daguan` 仅为示意，请换成你的真实账户）。
+
+先渲染到临时文件，确认无误后再安装：
 
 ```bash
-sudo install -m 644 deploy/daguan-cxy-update.service /etc/systemd/system/daguan-cxy-update.service
+DAGUAN_ROOT=/opt/daguan-cxy-local   # 必须改成你的真实仓库路径
+DAGUAN_UPDATE_USER=daguan           # 必须改成实际执行更新的账户
+
+sed -e "s#__ROOT__#${DAGUAN_ROOT}#g" -e "s#__UPDATE_USER__#${DAGUAN_UPDATE_USER}#g" \
+  deploy/daguan-cxy-update.service > /tmp/daguan-cxy-update.service
+
+grep -nE '^(WorkingDirectory|ExecStart|Environment=DAGUAN_UPDATE_USER)=' /tmp/daguan-cxy-update.service
+grep -q '__' /tmp/daguan-cxy-update.service && { echo "仍有未渲染的占位符，请检查上面的变量" >&2; exit 1; }
+
+sudo install -m 644 /tmp/daguan-cxy-update.service /etc/systemd/system/daguan-cxy-update.service
 sudo install -m 644 deploy/daguan-cxy-update.timer /etc/systemd/system/daguan-cxy-update.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now daguan-cxy-update.timer
