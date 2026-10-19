@@ -208,9 +208,12 @@ function normalizeQuestion(source, categories) {
   const options = Array.isArray(document.options) ? document.options : (source.options || []);
   const correctIds = document.answer?.option_ids || source.answer?.option_ids || [];
   const correctLabels = options.filter(option => correctIds.includes(option.id)).map(option => option.label);
-  if (type !== "subjective" && (!correctLabels.length || correctLabels.length !== correctIds.length)) {
-    throw new Error(`选择题 ${source.id} 的正确选项与选项列表不匹配`);
-  }
+  // 官网自身会留下残缺选择题（答案待补充、正确项不在选项里）。先算出原因，
+  // 但分类与非法值校验必须先行：残缺题同样不得绕过分类完整性检查。
+  const incompleteReason = type === "subjective" ? null
+    : !correctIds.length ? "官网未提供正确选项"
+    : !correctLabels.length ? "正确选项不在选项列表中"
+    : correctLabels.length !== correctIds.length ? "正确选项数量与选项列表不匹配" : null;
   // 分类净化已在 sanitizeOfficialCategories 前置完成，这里只做幂等校验：
   // 仍悬空或不合法的引用说明净化被绕过，必须显式失败，不在此处再次降级。
   const requestedIds = [...new Set((source.category_ids || []).map(Number))];
@@ -229,6 +232,8 @@ function normalizeQuestion(source, categories) {
   for (const id of categoryIds) {
     if (!categories.has(id)) throw new Error(`题目 ${source.id} 的次要分类在净化后仍不存在：${id}`);
   }
+  // 分类校验全部通过后，才允许跳过残缺题；它不进入任何分片或索引。
+  if (incompleteReason) return { skip: { id: Number(source.id), reason: incompleteReason } };
   const answer = type === "subjective"
     ? String(document.answer?.reference_answer_md ?? source.answer?.reference_answer_md ?? source.correct_answer ?? "")
     : (correctLabels.length ? correctLabels.join("") : String(source.correct_answer || ""));
@@ -268,7 +273,12 @@ function buildCatalog(snapshot, refs) {
   const types = {};
   const hashes = new Set();
   for (const source of snapshot.questions) {
-    const question = normalizeQuestion(source, categories);
+    const normalized = normalizeQuestion(source, categories);
+    if (normalized?.skip) {
+      refs.incompleteQuestionRefs.push(normalized.skip);
+      continue;
+    }
+    const question = normalized;
     const primary = categories.get(question.category_id) || categories.get(question.category_ids[0]);
     const shard = primary ? shardByRoot.get(primary.rootId) : "未分类";
     if (!shard) throw new Error(`题目 ${question.id} 找不到分片`);
@@ -305,7 +315,9 @@ function buildCatalog(snapshot, refs) {
   catalog.push({ id: "orphan", name: "未分类", parent_id: null,
     question_count: categoryQuestions.get("orphan")?.length || 0,
     direct_count: categoryQuestions.get("orphan")?.length || 0, children: [] });
-  const manifest = { version: 1, total: snapshot.total, types,
+  // total 只统计真正写入分片的题数；被跳过的官网残缺题不计入，但 source_total 仍保留官网总数。
+  const writtenTotal = Object.values(shards).reduce((sum, list) => sum + list.length, 0);
+  const manifest = { version: 1, total: writtenTotal, types,
     shards: Object.fromEntries([...fileByShard].map(([name, file]) => [name, { file, count: shards[name].length }])),
     asset_count: hashes.size, asset_base: "./data/assets/", synced_at: new Date().toISOString(),
     source: `${base}/math`, source_total: snapshot.total };
@@ -313,7 +325,8 @@ function buildCatalog(snapshot, refs) {
     idIndex, searchIndex, manifest, hashes,
     strayCategoryRefs: refs.strayCategoryRefs,
     strayPrimaryRefs: refs.strayPrimaryRefs,
-    unclassifiedPrimaryRefs: refs.unclassifiedPrimaryRefs };
+    unclassifiedPrimaryRefs: refs.unclassifiedPrimaryRefs,
+    incompleteQuestionRefs: refs.incompleteQuestionRefs };
 }
 
 async function downloadAssets(hashes, dataDir, fallbackAssetsDir, signal) {
@@ -382,7 +395,7 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
   if (fingerprint === currentFingerprint) return { unchanged: true, fingerprint, sourceTotal: officialSnapshot.total };
   // 顺序固定：官方快照分类净化 → 本地 overlay → 构建目录。净化先于 overlay，
   // 保证 applyLocalClassifications 只见到净化后的官方引用，本地校验强度不变。
-  const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [] };
+  const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [], incompleteQuestionRefs: [] };
   const sanitized = sanitizeOfficialCategories(officialSnapshot, categoryIndex(officialSnapshot.categories), refs);
   const snapshot = applyLocalClassifications(sanitized, await readLocalClassifications(overlayDir));
   const result = buildCatalog(snapshot, refs);
@@ -398,7 +411,10 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
     ]);
     const overlay = await mergeLocalQuestionBanks(stage, overlayDir);
     const merged = JSON.parse(await fs.readFile(path.join(stage, "manifest.json"), "utf8"));
-    if (merged.total !== snapshot.total + overlay.added) throw new Error(`本地题库合并异常：${merged.total}`);
+    // 基线用构建后的 manifest.total（已排除跳过的残缺题），不能用官网原始总数硬比。
+    if (merged.total !== result.manifest.total + overlay.added) {
+      throw new Error(`本地题库合并异常：${merged.total}`);
+    }
     const nativeSolutionStats = await applyNativeSolutions(stage, overlayDir);
     await reconcileVideoMappings(stage, overlayDir);
     if (signal?.aborted) throw signal.reason;
@@ -410,7 +426,7 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
       await fs.copyFile(path.join(stage, file), target);
     }
     const missingAssets = await downloadAssets(result.hashes, targetDir, fallbackAssetsDir, signal);
-    const { strayCategoryRefs, strayPrimaryRefs, unclassifiedPrimaryRefs } = result;
+    const { strayCategoryRefs, strayPrimaryRefs, unclassifiedPrimaryRefs, incompleteQuestionRefs } = result;
     if (strayCategoryRefs.length) {
       console.warn(`官网分类悬空引用：${strayCategoryRefs.length} 道题的次要分类已被官网删除，已按题意丢弃；` +
         strayCategoryRefs.map(item => `${item.id}->[${item.categoryIds.join("、")}]`).join("，"));
@@ -423,11 +439,16 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
       console.warn(`官网主分类失效（无有效分类，归入未分类）：${unclassifiedPrimaryRefs.length} 道题；` +
         unclassifiedPrimaryRefs.map(item => `${item.id}: ${item.original}`).join("，"));
     }
+    if (incompleteQuestionRefs.length) {
+      console.warn(`官网残缺题（已跳过，不写入题库）：${incompleteQuestionRefs.length} 道题；` +
+        incompleteQuestionRefs.map(item => `${item.id}: ${item.reason}`).join("，"));
+    }
     return { fingerprint, sourceTotal: snapshot.total, total: merged.total, missingAssets,
       native_solution_stats: nativeSolutionStats,
       strayCategoryRefs, strayCategoryCount: strayCategoryRefs.length,
       strayPrimaryRefs, strayPrimaryCount: strayPrimaryRefs.length,
-      unclassifiedPrimaryRefs, unclassifiedPrimaryCount: unclassifiedPrimaryRefs.length };
+      unclassifiedPrimaryRefs, unclassifiedPrimaryCount: unclassifiedPrimaryRefs.length,
+      incompleteQuestionRefs, incompleteQuestionCount: incompleteQuestionRefs.length };
   } finally {
     const resolvedStage = path.resolve(stage);
     if (!resolvedStage.startsWith(path.resolve(os.tmpdir()) + path.sep) ||

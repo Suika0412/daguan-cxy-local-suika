@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { applyLocalClassifications, syncOfficialQuestionBank } from "../local-server/official-question-bank.mjs";
+import { mergeLocalQuestionBanks } from "../shared/local-question-banks.mjs";
 import { createQuestionBankUpdater } from "../local-server/question-bank-updater.mjs";
 import { applyNativeSolutions, emptyNativeSolutionStats, questionSignature } from "../shared/native-solutions.mjs";
 
@@ -568,5 +569,106 @@ test("illegal primary category values still fail before writing", async () => {
       restoreFetch();
       await rmTemp(temp, "daguan-illegal-primary-");
     }
+  }
+});
+
+// 官网残缺选择题（answer 待补充、正确项不在选项里）必须跳过且不写入任何分片/索引，
+// manifest.total 只统计实际写入题数，source_total 仍保留官网总数。
+test("incomplete official choice questions are skipped and excluded from manifest total", async () => {
+  const incomplete = {
+    id: 11436, category_id: 223, category_ids: [223], content_hash: "h11436", is_core: false,
+    document: { question_type: "single_choice", stem_md: "题干", options: choiceOptions,
+      answer: { option_ids: [] }, explanation_md: "本题题干存在错误" },
+  };
+  const healthy = {
+    id: 11437, category_id: 223, category_ids: [223], content_hash: "h11437", is_core: false,
+    document: { question_type: "single_choice", stem_md: "正常题干", options: choiceOptions,
+      answer: { option_ids: ["opt-a"] } },
+  };
+  const restoreFetch = stubOfficialFetch([incomplete, healthy]);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-incomplete-choice-"));
+  const targetDir = path.join(temp, "target");
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = message => warnings.push(String(message));
+  try {
+    await writeMappingFiles(targetDir);
+    const result = await syncOfficialQuestionBank({ targetDir });
+    assert.equal(result.incompleteQuestionCount, 1);
+    assert.deepEqual(result.incompleteQuestionRefs, [{ id: 11436, reason: "官网未提供正确选项" }]);
+    assert.equal(result.sourceTotal, 2);
+    const manifest = await readJson(path.join(targetDir, "manifest.json"));
+    assert.equal(manifest.total, 1);
+    assert.equal(manifest.source_total, 2);
+    assert.equal(manifest.shards["高等数学"].count, 1);
+    const shard = await readJson(path.join(targetDir, "shards/高等数学.json"));
+    assert.equal(shard.length, 1);
+    assert.equal(shard[0].id, 11437);
+    const idIndex = await readJson(path.join(targetDir, "id_index.json"));
+    assert.equal(Object.hasOwn(idIndex, "11436"), false);
+    assert.equal(idIndex["11437"], "高等数学");
+    const searchIndex = await readJson(path.join(targetDir, "search_index.json"));
+    assert.equal(searchIndex.some(item => item.id === 11436), false);
+    const categoryQuestions = await readJson(path.join(targetDir, "category_questions.json"));
+    assert.equal((categoryQuestions["223"] || []).includes(11436), false);
+    const skipped = warnings.filter(message => message.includes("官网残缺题"));
+    assert.equal(skipped.length, 1);
+    assert.match(skipped[0], /11436: 官网未提供正确选项/);
+  } finally {
+    console.warn = originalWarn;
+    restoreFetch();
+    await rmTemp(temp, "daguan-incomplete-choice-");
+  }
+});
+
+// 残缺选择题同样不得绕过分类完整性校验：非法分类必须先失败且不写盘。
+test("incomplete choice question with an illegal category still fails before writing", async () => {
+  const broken = {
+    id: 11438, category_id: 0, category_ids: [223], content_hash: "h11438", is_core: false,
+    document: { question_type: "single_choice", stem_md: "题干", options: choiceOptions,
+      answer: { option_ids: [] } },
+  };
+  const restoreFetch = stubOfficialFetch([broken]);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-incomplete-illegal-cat-"));
+  const targetDir = path.join(temp, "target");
+  try {
+    await writeMappingFiles(targetDir);
+    await assert.rejects(() => syncOfficialQuestionBank({ targetDir }), /题目 11438 的主分类不合法：0/);
+    await assert.rejects(() => fs.access(path.join(targetDir, "manifest.json")));
+  } finally {
+    restoreFetch();
+    await rmTemp(temp, "daguan-incomplete-illegal-cat-");
+  }
+});
+
+// 本地 overlay 题库的选择题形状校验不得随官网残缺题跳过而放宽。
+test("local overlay malformed choice questions still fail", async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-overlay-choice-"));
+  const dataDir = path.join(temp, "data");
+  const overlayDir = path.join(temp, "overlay");
+  try {
+    await fs.mkdir(path.join(dataDir, "shards"), { recursive: true });
+    await Promise.all([
+      fs.writeFile(path.join(dataDir, "manifest.json"), JSON.stringify({ total: 1, types: {},
+        shards: { 高等数学: { file: "shards/高等数学.json", count: 0 } } })),
+      fs.writeFile(path.join(dataDir, "shards/高等数学.json"), JSON.stringify([])),
+      fs.writeFile(path.join(dataDir, "categories.json"), JSON.stringify([
+        { id: 223, name: "高等数学", parent_id: null, question_count: 0, direct_count: 0, children: [] }])),
+      fs.writeFile(path.join(dataDir, "category_questions.json"), JSON.stringify({ 223: [] })),
+      fs.writeFile(path.join(dataDir, "id_index.json"), JSON.stringify({})),
+      fs.writeFile(path.join(dataDir, "search_index.json"), JSON.stringify([])),
+    ]);
+    await fs.mkdir(path.join(overlayDir, "local_question_banks"), { recursive: true });
+    await fs.writeFile(path.join(overlayDir, "local_question_banks/bad.json"), JSON.stringify({
+      shard: "高等数学",
+      parentCategoryId: 223,
+      rootCategory: { id: 9900300, name: "坏题库" },
+      chapters: [{ id: 9900301, name: "一章", questionCount: 1 }],
+      questions: [{ id: 990030001, type: "single_choice", category_id: 9900301,
+        category_path: "坏题库 / 一章", stem: "题干", options: [], correct_labels: ["A"] }],
+    }));
+    await assert.rejects(() => mergeLocalQuestionBanks(dataDir, overlayDir), /缺少选项/);
+  } finally {
+    await rmTemp(temp, "daguan-overlay-choice-");
   }
 });
