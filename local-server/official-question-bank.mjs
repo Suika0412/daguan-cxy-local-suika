@@ -7,10 +7,16 @@ import { applyNativeSolutions } from "../shared/native-solutions.mjs";
 
 const base = "https://www.cxyonly.fans";
 const pageSize = 200;
-const shardByRoot = new Map([
+// 根分类决定题库分片归属。223/1/601 是题库主体（高数/线代/概率），
+// 缺失说明官网结构异常，同步必须中止；836/2500 属可选板块，
+// 官网下线后不再阻断同步，对应分片按空数组生成（旧题目随快照重建自然消失，不保留）。
+const requiredRootShards = new Map([
   [223, "高等数学"], [1, "线性代数"], [601, "概率统计"],
+]);
+const optionalRootShards = new Map([
   [836, "历年真题"], [2500, "模拟哥专区"],
 ]);
+const shardByRoot = new Map([...requiredRootShards, ...optionalRootShards]);
 const fileByShard = new Map([
   ...[...shardByRoot.values()].map(name => [name, `shards/${name}.json`]),
   ["未分类", "shards/未分类.json"],
@@ -69,7 +75,8 @@ function categoryIndex(categories) {
     for (const child of category.children || []) visit(child, id, rootId, byId.get(id).path);
   }
   for (const rootCategory of categories) visit(rootCategory);
-  for (const rootId of shardByRoot.keys()) {
+  // 只强制必需根分类；可选板块缺失时其分片按空数组生成。
+  for (const rootId of requiredRootShards.keys()) {
     if (!byId.has(rootId) || byId.get(rootId).parent !== null) throw new Error(`官网缺少预期根分类 ${rootId}`);
   }
   return byId;
@@ -79,7 +86,19 @@ export function applyLocalClassifications(snapshot, config) {
   if (!config) return snapshot;
   if (config.version !== 1 || !config.assignments || typeof config.assignments !== "object" ||
       !Array.isArray(config.categories)) throw new Error("本地分类映射格式不合法");
+  const categories = structuredClone(snapshot.categories);
+  const existing = categoryIndex(categories);
+  // 可选根分类（836/2500）官网已下线时，挂在它下面的本地分类无处可挂。
+  // 显式跳过这些本地分类及其 assignment，题目保留并退回未分类；
+  // 不删除题目、不改挂到其它父分类，也不影响必需根缺失与未知父节点的报错路径。
+  const skippedLocalCategories = new Map();
+  for (const added of config.categories) {
+    if (!Number.isInteger(added.id) || !Number.isInteger(added.parent_id)) continue;
+    if (existing.has(added.parent_id) || !optionalRootShards.has(added.parent_id)) continue;
+    skippedLocalCategories.set(added.id, added.parent_id);
+  }
   const appliedIds = new Set();
+  const skippedQuestionIds = [];
   const questions = snapshot.questions.map(question => {
     const assignment = config.assignments[String(question.id)];
     if (question.category_id != null || (question.category_ids || []).length) {
@@ -94,11 +113,13 @@ export function applyLocalClassifications(snapshot, config) {
       throw new Error(`题目 ${question.id} 的本地分类无效`);
     }
     const ids = [...new Set(assignment.category_ids)];
+    if (ids.some(id => skippedLocalCategories.has(Number(id)))) {
+      skippedQuestionIds.push(question.id);
+      return question;
+    }
     ids.forEach(id => appliedIds.add(id));
     return { ...question, category_id: ids[0], category_ids: ids };
   });
-  const categories = structuredClone(snapshot.categories);
-  const existing = categoryIndex(categories);
   for (const added of config.categories) {
     if (!appliedIds.has(added.id)) continue;
     if (!Number.isInteger(added.id) || !Number.isInteger(added.parent_id) ||
@@ -111,12 +132,23 @@ export function applyLocalClassifications(snapshot, config) {
     existing.set(added.id, { source: category, parent: added.parent_id });
   }
   const validIds = categoryIndex(categories);
+  // 只校验本地 assignment 引入的分类：官网原始 category_ids 里可能带有已被官网删除的次要分类，
+  // 那些交给 buildCatalog/normalizeQuestion 统一过滤并计入 stray，不在此处判死。
   for (const question of questions) {
     for (const id of question.category_ids || []) {
+      if (!appliedIds.has(Number(id))) continue;
       if (!validIds.has(Number(id))) throw new Error(`题目 ${question.id} 的本地分类不存在：${id}`);
     }
   }
-  return { ...snapshot, questions, categories };
+  const skippedRoots = [...new Set(skippedLocalCategories.values())];
+  if (skippedLocalCategories.size || skippedQuestionIds.length) {
+    console.warn(`本地分类跳过：可选根分类 ${skippedRoots.join("、")} 官网已缺失，` +
+      `忽略 ${skippedLocalCategories.size} 个本地分类与 ${skippedQuestionIds.length} 条题目映射，` +
+      `相关题目保留为未分类（${skippedQuestionIds.join("、") || "无"}）`);
+  }
+  return { ...snapshot, questions, categories,
+    skippedLocalClassifications: { roots: skippedRoots,
+      categories: [...skippedLocalCategories.keys()], questions: skippedQuestionIds } };
 }
 
 async function readLocalClassifications(overlayDir) {
@@ -126,6 +158,44 @@ async function readLocalClassifications(overlayDir) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
+}
+
+/**
+ * 官方快照分类引用的唯一净化权威。必须在 applyLocalClassifications 之前调用，
+ * 使本地 overlay 只能看到净化后的引用，无法借道绕过校验。
+ * 三类语义：次要悬空过滤 / 失效主分类提升第一个有效分类 / 无有效分类归未分类；
+ * NaN、0、负数、非整数等损坏值仍显式失败。
+ */
+function sanitizeOfficialCategories(snapshot, categories, refs) {
+  const questions = snapshot.questions.map(source => {
+    const requestedIds = [...new Set((source.category_ids || []).map(Number))];
+    for (const id of requestedIds) {
+      if (!Number.isInteger(id) || id <= 0) throw new Error(`题目 ${source.id} 指向不存在的分类 ${id}`);
+    }
+    const primaryRaw = source.category_id;
+    const primaryId = primaryRaw == null ? null : Number(primaryRaw);
+    if (primaryId != null && (!Number.isInteger(primaryId) || primaryId <= 0)) {
+      throw new Error(`题目 ${source.id} 的主分类不合法：${primaryRaw}`);
+    }
+    const categoryIds = requestedIds.filter(id => categories.has(id));
+    const strayCategoryIds = requestedIds.filter(id => !categories.has(id));
+    if (strayCategoryIds.length) {
+      refs.strayCategoryRefs.push({ id: Number(source.id), categoryIds: strayCategoryIds });
+    }
+    let categoryId = primaryId;
+    if (primaryId != null && !categories.has(primaryId)) {
+      if (categoryIds.length) {
+        categoryId = categoryIds[0];
+        refs.strayPrimaryRefs.push({ id: Number(source.id), original: primaryId,
+          fallback: categoryId, categoryIds });
+      } else {
+        categoryId = null;
+        refs.unclassifiedPrimaryRefs.push({ id: Number(source.id), original: primaryId });
+      }
+    }
+    return { ...source, category_id: categoryId, category_ids: categoryIds };
+  });
+  return { ...snapshot, questions };
 }
 
 function normalizeQuestion(source, categories) {
@@ -141,10 +211,23 @@ function normalizeQuestion(source, categories) {
   if (type !== "subjective" && (!correctLabels.length || correctLabels.length !== correctIds.length)) {
     throw new Error(`选择题 ${source.id} 的正确选项与选项列表不匹配`);
   }
-  const categoryIds = [...new Set((source.category_ids || []).map(Number))];
-  for (const id of categoryIds) if (!categories.has(id)) throw new Error(`题目 ${source.id} 指向不存在的分类 ${id}`);
-  if (source.category_id != null && !categories.has(Number(source.category_id))) {
-    throw new Error(`题目 ${source.id} 的主分类不存在：${source.category_id}`);
+  // 分类净化已在 sanitizeOfficialCategories 前置完成，这里只做幂等校验：
+  // 仍悬空或不合法的引用说明净化被绕过，必须显式失败，不在此处再次降级。
+  const requestedIds = [...new Set((source.category_ids || []).map(Number))];
+  for (const id of requestedIds) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error(`题目 ${source.id} 指向不存在的分类 ${id}`);
+  }
+  const primaryRaw = source.category_id;
+  const categoryId = primaryRaw == null ? null : Number(primaryRaw);
+  if (categoryId != null && !Number.isInteger(categoryId)) {
+    throw new Error(`题目 ${source.id} 的主分类不合法：${primaryRaw}`);
+  }
+  if (categoryId != null && !categories.has(categoryId)) {
+    throw new Error(`题目 ${source.id} 的主分类在净化后仍不存在：${primaryRaw}`);
+  }
+  const categoryIds = requestedIds;
+  for (const id of categoryIds) {
+    if (!categories.has(id)) throw new Error(`题目 ${source.id} 的次要分类在净化后仍不存在：${id}`);
   }
   const answer = type === "subjective"
     ? String(document.answer?.reference_answer_md ?? source.answer?.reference_answer_md ?? source.correct_answer ?? "")
@@ -158,7 +241,7 @@ function normalizeQuestion(source, categories) {
     source: String(document.source ?? source.source ?? ""),
     type,
     is_core: source.is_core === true,
-    category_id: source.category_id == null ? null : Number(source.category_id),
+    category_id: categoryId,
     category_ids: categoryIds,
     category_path: categoryIds.map(id => categories.get(id).path).join("、"),
     serial: Number.isFinite(Number(document.serial_number ?? source.serial_number))
@@ -176,7 +259,7 @@ async function writeJson(file, value, pretty = false) {
   await fs.writeFile(file, `${JSON.stringify(value, null, pretty ? 2 : 0)}\n`);
 }
 
-function buildCatalog(snapshot) {
+function buildCatalog(snapshot, refs) {
   const categories = categoryIndex(snapshot.categories);
   const shards = Object.fromEntries([...fileByShard.keys()].map(name => [name, []]));
   const categoryQuestions = new Map();
@@ -227,7 +310,10 @@ function buildCatalog(snapshot) {
     asset_count: hashes.size, asset_base: "./data/assets/", synced_at: new Date().toISOString(),
     source: `${base}/math`, source_total: snapshot.total };
   return { shards, categories: catalog, categoryQuestions: Object.fromEntries(categoryQuestions),
-    idIndex, searchIndex, manifest, hashes };
+    idIndex, searchIndex, manifest, hashes,
+    strayCategoryRefs: refs.strayCategoryRefs,
+    strayPrimaryRefs: refs.strayPrimaryRefs,
+    unclassifiedPrimaryRefs: refs.unclassifiedPrimaryRefs };
 }
 
 async function downloadAssets(hashes, dataDir, fallbackAssetsDir, signal) {
@@ -294,8 +380,12 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
     categories: officialSnapshot.categories,
   })).digest("hex");
   if (fingerprint === currentFingerprint) return { unchanged: true, fingerprint, sourceTotal: officialSnapshot.total };
-  const snapshot = applyLocalClassifications(officialSnapshot, await readLocalClassifications(overlayDir));
-  const result = buildCatalog(snapshot);
+  // 顺序固定：官方快照分类净化 → 本地 overlay → 构建目录。净化先于 overlay，
+  // 保证 applyLocalClassifications 只见到净化后的官方引用，本地校验强度不变。
+  const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [] };
+  const sanitized = sanitizeOfficialCategories(officialSnapshot, categoryIndex(officialSnapshot.categories), refs);
+  const snapshot = applyLocalClassifications(sanitized, await readLocalClassifications(overlayDir));
+  const result = buildCatalog(snapshot, refs);
   const stage = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-official-sync-"));
   try {
     for (const [name, file] of fileByShard) await writeJson(path.join(stage, file), result.shards[name]);
@@ -320,8 +410,24 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
       await fs.copyFile(path.join(stage, file), target);
     }
     const missingAssets = await downloadAssets(result.hashes, targetDir, fallbackAssetsDir, signal);
+    const { strayCategoryRefs, strayPrimaryRefs, unclassifiedPrimaryRefs } = result;
+    if (strayCategoryRefs.length) {
+      console.warn(`官网分类悬空引用：${strayCategoryRefs.length} 道题的次要分类已被官网删除，已按题意丢弃；` +
+        strayCategoryRefs.map(item => `${item.id}->[${item.categoryIds.join("、")}]`).join("，"));
+    }
+    if (strayPrimaryRefs.length) {
+      console.warn(`官网主分类失效（已降级到有效备用分类）：${strayPrimaryRefs.length} 道题；` +
+        strayPrimaryRefs.map(item => `${item.id}: ${item.original}->${item.fallback}`).join("，"));
+    }
+    if (unclassifiedPrimaryRefs.length) {
+      console.warn(`官网主分类失效（无有效分类，归入未分类）：${unclassifiedPrimaryRefs.length} 道题；` +
+        unclassifiedPrimaryRefs.map(item => `${item.id}: ${item.original}`).join("，"));
+    }
     return { fingerprint, sourceTotal: snapshot.total, total: merged.total, missingAssets,
-      native_solution_stats: nativeSolutionStats };
+      native_solution_stats: nativeSolutionStats,
+      strayCategoryRefs, strayCategoryCount: strayCategoryRefs.length,
+      strayPrimaryRefs, strayPrimaryCount: strayPrimaryRefs.length,
+      unclassifiedPrimaryRefs, unclassifiedPrimaryCount: unclassifiedPrimaryRefs.length };
   } finally {
     const resolvedStage = path.resolve(stage);
     if (!resolvedStage.startsWith(path.resolve(os.tmpdir()) + path.sep) ||
