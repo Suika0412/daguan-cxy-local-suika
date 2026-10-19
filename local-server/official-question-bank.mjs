@@ -187,6 +187,76 @@ function examCategoryPathOf(question, path) {
   return { subject, year, path: segments.join(" / "), subjectPath: `${examRootCategoryName} / ${subject}` };
 }
 
+// 卷内题号解析。source 是自由文本，一道题可能带多段「年份+科目（题号）」，
+// 例如「2005数二（6）；2005数一（5）」在数一卷里是第 5 题、在数二卷里是第 6 题：
+// 取第一个括号会把题号排到别的科目上，所以必须按叶子科目的年份取段。
+// 括号内容只认两种已观察形态：纯数字，以及「一6、二7、三5」这类按科目列举；
+// 其余括号（「仅数三」「先于真题出现」「版本二」「第三大题第（2）小题」）不是题号。
+// 没有题号返回 { missing: true }，不抛错；同一卷解析出多个不同题号必须显式失败。
+export function parsePaperNumber(source, { subject, year } = {}) {
+  if (!examSubjectNames.includes(subject)) {
+    throw new Error(`卷内题号需要真题科目（${examSubjectNames.join("、")}）：${subject}`);
+  }
+  const yearText = String(year ?? "");
+  if (!examYearCategoryPattern.test(yearText)) throw new Error(`卷内题号需要四位年份：${year ?? ""}`);
+  const subjectChar = subject.slice(1);
+  const numbers = [];
+  // 全角/半角括号都要认；年份与科目紧贴括号，避免把后面的题源括号当成题号。
+  for (const match of String(source ?? "").matchAll(/(\d{4})\s*数([一二三]+)\s*[（(]([^）)]*)[）)]/g)) {
+    if (match[1] !== yearText || !match[2].includes(subjectChar)) continue;
+    const body = match[3].trim();
+    if (/^\d+$/.test(body)) {
+      numbers.push(Number(body));
+      continue;
+    }
+    for (const part of body.split(/[、,，]/)) {
+      const item = part.trim().match(/^([一二三])\s*(\d+)$/);
+      if (item && item[1] === subjectChar) numbers.push(Number(item[2]));
+    }
+  }
+  const unique = [...new Set(numbers)];
+  if (!unique.length) return { missing: true };
+  if (unique.length > 1) {
+    throw new Error(`真题题号冲突：${subject} ${yearText} 解析出多个题号 ${unique.join("、")}：${String(source)}`);
+  }
+  return { number: unique[0] };
+}
+
+// 分类路径是否为「历年真题 / 科目 / 年份」叶子。真题聚合节点（根、科目二级）返回 null：
+// 它们没有单一卷内题号，不能拿某个年份叶子的题号去排。
+function examPaperLeafOf(categoryPath) {
+  const segments = splitCategoryPath(categoryPath);
+  if (segments.length !== 3) return null;
+  const [root, subject, year] = segments;
+  if (root !== examRootCategoryName) return null;
+  if (!examSubjectNames.includes(subject) || !examYearCategoryPattern.test(year)) return null;
+  return { subject, year };
+}
+
+// 单个真题叶子的卷内排序：题号升序；缺号项放末尾并保持输入相对顺序；同号保持原顺序。
+// 不按 id 去重——跨卷共享题在各自叶子里是不同的卷内位置（如「一5、二7、三5」），
+// 必须逐个叶子用该叶子的科目与年份解析。缺号不丢弃，随 missing 一起返回供审计。
+// 非真题路径原样返回一份副本；题号冲突由 parsePaperNumber 抛出，不在此静默兜底。
+export function sortExamPaperQuestions(categoryPath, ids, questionsById) {
+  const leaf = examPaperLeafOf(categoryPath);
+  if (!leaf) return { ids: [...ids], missing: [] };
+  const rows = ids.map((id, index) => {
+    const question = questionsById.get(Number(id));
+    if (!question) throw new Error(`真题叶子 ${categoryPath} 引用了不存在的题目 ${id}`);
+    return { id: Number(id), index, source: String(question.source ?? ""),
+      parsed: parsePaperNumber(question.source, leaf) };
+  });
+  const missing = rows.filter(row => row.parsed.missing)
+    .map(row => ({ id: row.id, path: categoryPath, source: row.source }));
+  const ordered = [...rows].sort((left, right) => {
+    const a = left.parsed, b = right.parsed;
+    if (!!a.missing !== !!b.missing) return a.missing ? 1 : -1;
+    if (!a.missing && a.number !== b.number) return a.number - b.number;
+    return left.index - right.index;
+  });
+  return { ids: ordered.map(row => row.id), missing };
+}
+
 export function synthesizeExamCategoryTree(snapshot) {
   if (!Array.isArray(snapshot?.questions) || !Array.isArray(snapshot?.categories)) {
     throw new Error("真题分类合成需要 questions 与 categories 数组");
@@ -469,6 +539,8 @@ function buildCatalog(snapshot, refs) {
   const categories = categoryIndex(snapshot.categories);
   const shards = Object.fromEntries([...fileByShard.keys()].map(name => [name, []]));
   const categoryQuestions = new Map();
+  // 排序需要题目对象上的 source，而 categoryQuestions 只存 id。
+  const questionById = new Map();
   const idIndex = {};
   const searchIndex = [];
   const types = {};
@@ -488,6 +560,7 @@ function buildCatalog(snapshot, refs) {
       : "未分类";
     if (!shard) throw new Error(`题目 ${question.id} 找不到分片`);
     shards[shard].push(question);
+    questionById.set(question.id, question);
     idIndex[question.id] = shard;
     searchIndex.push({ id: question.id, source: question.source, type: question.type,
       path: question.category_path, serial: question.serial, stem: question.stem });
@@ -508,6 +581,16 @@ function buildCatalog(snapshot, refs) {
     for (const match of JSON.stringify(question).matchAll(/(?:assets\/|question-assets\/)([0-9a-fA-F]{64})(?:\.png)?/g)) {
       hashes.add(match[1].toLowerCase());
     }
+  }
+  // 目录与做题顺序只由 categoryQuestions 的数组顺序决定，而它在上面按官网返回顺序
+  // （≈ 题目 id 序，与卷内题序无关）累积。这里只重排「历年真题 / 科目 / 年份」叶子，
+  // 使每份试卷回到出题顺序；分片数组、聚合节点和其它分类都不动。
+  for (const [categoryId, ids] of categoryQuestions) {
+    const entry = categories.get(Number(categoryId));
+    if (!entry) continue;
+    const sorted = sortExamPaperQuestions(entry.path, ids, questionById);
+    categoryQuestions.set(categoryId, sorted.ids);
+    refs.missingPaperNumberRefs.push(...sorted.missing);
   }
   function normalizeCategory(source, parent = null) {
     const id = Number(source.id);
@@ -531,7 +614,8 @@ function buildCatalog(snapshot, refs) {
     strayCategoryRefs: refs.strayCategoryRefs,
     strayPrimaryRefs: refs.strayPrimaryRefs,
     unclassifiedPrimaryRefs: refs.unclassifiedPrimaryRefs,
-    incompleteQuestionRefs: refs.incompleteQuestionRefs };
+    incompleteQuestionRefs: refs.incompleteQuestionRefs,
+    missingPaperNumberRefs: refs.missingPaperNumberRefs };
 }
 
 async function downloadAssets(hashes, dataDir, fallbackAssetsDir, signal) {
@@ -604,7 +688,8 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
   // 顺序固定：官网分类树校验 → 真题分类合成 → 官方快照分类净化 → 本地 overlay → 构建目录。
   // 必需根（223/1/601）校验先行，缺根本身就是官网结构异常，不该被合成或净化的报错盖掉；
   // 合成必须先于净化：真题叶子只存在于题目记录里，树不补齐就会被判悬空并丢弃。
-  const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [], incompleteQuestionRefs: [] };
+  const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [],
+    incompleteQuestionRefs: [], missingPaperNumberRefs: [] };
   categoryIndex(officialSnapshot.categories);
   const synthesized = synthesizeExamCategoryTree(officialSnapshot);
   const sanitized = sanitizeOfficialCategories(synthesized, categoryIndex(synthesized.categories), refs);
@@ -637,7 +722,8 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
       await fs.copyFile(path.join(stage, file), target);
     }
     const missingAssets = await downloadAssets(result.hashes, targetDir, fallbackAssetsDir, signal);
-    const { strayCategoryRefs, strayPrimaryRefs, unclassifiedPrimaryRefs, incompleteQuestionRefs } = result;
+    const { strayCategoryRefs, strayPrimaryRefs, unclassifiedPrimaryRefs, incompleteQuestionRefs,
+      missingPaperNumberRefs } = result;
     if (strayCategoryRefs.length) {
       console.warn(`官网分类悬空引用：${strayCategoryRefs.length} 道题的次要分类已被官网删除，已按题意丢弃；` +
         strayCategoryRefs.map(item => `${item.id}->[${item.categoryIds.join("、")}]`).join("，"));
@@ -654,12 +740,17 @@ export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetD
       console.warn(`官网残缺题（已跳过，不写入题库）：${incompleteQuestionRefs.length} 道题；` +
         incompleteQuestionRefs.map(item => `${item.id}: ${item.reason}`).join("，"));
     }
+    if (missingPaperNumberRefs.length) {
+      console.warn(`真题缺少卷内题号（已排在卷末，卷内其余题按题号排列）：${missingPaperNumberRefs.length} 条；` +
+        missingPaperNumberRefs.map(item => `${item.id}@${item.path}`).join("，"));
+    }
     return { fingerprint, sourceTotal: snapshot.total, total: merged.total, missingAssets,
       native_solution_stats: nativeSolutionStats,
       strayCategoryRefs, strayCategoryCount: strayCategoryRefs.length,
       strayPrimaryRefs, strayPrimaryCount: strayPrimaryRefs.length,
       unclassifiedPrimaryRefs, unclassifiedPrimaryCount: unclassifiedPrimaryRefs.length,
-      incompleteQuestionRefs, incompleteQuestionCount: incompleteQuestionRefs.length };
+      incompleteQuestionRefs, incompleteQuestionCount: incompleteQuestionRefs.length,
+      missingPaperNumberRefs, missingPaperNumberCount: missingPaperNumberRefs.length };
   } finally {
     const resolvedStage = path.resolve(stage);
     if (!resolvedStage.startsWith(path.resolve(os.tmpdir()) + path.sep) ||

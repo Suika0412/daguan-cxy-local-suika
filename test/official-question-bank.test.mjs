@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { syncOfficialQuestionBank, synthesizeExamCategoryTree, synthesizedCategoryId } from "../local-server/official-question-bank.mjs";
+import { parsePaperNumber, sortExamPaperQuestions, syncOfficialQuestionBank, synthesizeExamCategoryTree, synthesizedCategoryId } from "../local-server/official-question-bank.mjs";
 
 // 官网原始记录的字段是 category_full_path / category_name；category_path 只是本地
 // normalizeQuestion 的产物，原始快照里没有，这里不构造它。
@@ -152,6 +152,126 @@ test("synthesized IDs and official leaf IDs conflicting with the current tree fa
     questions: [] }), /不合法或重复/);
 });
 
+// --- 卷内题号解析：source 是多段自由文本，必须按叶子科目与年份取段 ---
+test("卷内题号从单科括号里取数字，全角半角括号都认", () => {
+  assert.deepEqual(parsePaperNumber("2009数一（5）", { subject: "数一", year: "2009" }), { number: 5 });
+  assert.deepEqual(parsePaperNumber("2009数一(23)", { subject: "数一", year: 2009 }), { number: 23 });
+});
+
+test("多科目列举只取当前科目那一项", () => {
+  const source = "2009数一二三（一6、二7、三5）";
+  assert.deepEqual(parsePaperNumber(source, { subject: "数一", year: "2009" }), { number: 6 });
+  assert.deepEqual(parsePaperNumber(source, { subject: "数二", year: "2009" }), { number: 7 });
+  assert.deepEqual(parsePaperNumber(source, { subject: "数三", year: "2009" }), { number: 5 });
+});
+
+test("多段来源按科目取对应段，不取第一个括号", () => {
+  // 在数一卷里是第 5 题，在数二卷里是第 6 题；取第一个括号会把数一错排成第 6 题。
+  const source = "2005数二（6）；2005数一（5）";
+  assert.deepEqual(parsePaperNumber(source, { subject: "数一", year: "2005" }), { number: 5 });
+  assert.deepEqual(parsePaperNumber(source, { subject: "数二", year: "2005" }), { number: 6 });
+});
+
+test("非题号括号和后续题源不会被当成题号", () => {
+  assert.deepEqual(parsePaperNumber("2003数三（4）；25 版 880 矩阵基础填空 13", { subject: "数三", year: "2003" }),
+    { number: 4 });
+  assert.deepEqual(parsePaperNumber("2013数一二三（版本二）", { subject: "数一", year: "2013" }), { missing: true });
+  assert.deepEqual(parsePaperNumber("2009数三（仅数三）", { subject: "数三", year: "2009" }), { missing: true });
+});
+
+test("没有题号返回 missing，不抛异常", () => {
+  assert.deepEqual(parsePaperNumber("2005数一", { subject: "数一", year: "2005" }), { missing: true });
+  assert.deepEqual(parsePaperNumber("1996数二；第三大题第（2）小题；880 基础解答 3-2",
+    { subject: "数二", year: "1996" }), { missing: true });
+  assert.deepEqual(parsePaperNumber("", { subject: "数一", year: "2009" }), { missing: true });
+});
+
+test("年份和科目都不串：段内年份或科目对不上即视为无题号", () => {
+  assert.deepEqual(parsePaperNumber("2009数一（5）", { subject: "数一", year: "2010" }), { missing: true });
+  assert.deepEqual(parsePaperNumber("2009数二（5）", { subject: "数一", year: "2009" }), { missing: true });
+});
+
+test("同一卷解析出多个不同题号时显式失败，不静默取第一个", () => {
+  assert.throws(() => parsePaperNumber("2009数一（5）；2009数一（7）", { subject: "数一", year: "2009" }),
+    /真题题号冲突/);
+});
+
+test("解析契约要求真题科目与四位年份", () => {
+  assert.throws(() => parsePaperNumber("2009数一（5）", { subject: "数四", year: "2009" }), /真题科目/);
+  assert.throws(() => parsePaperNumber("2009数一（5）", { subject: "数一", year: "09" }), /四位年份/);
+});
+
+// --- 卷内排序：只排「历年真题 / 科目 / 年份」叶子 ---
+const paperIndex = rows => new Map(rows.map(([id, source, serial]) => [id, { id, source, serial }]));
+
+test("乱序输入按卷内题号排序", () => {
+  const index = paperIndex([
+    [11, "2009数一（3）", 1],
+    [12, "2009数一（1）", 2],
+    [13, "2009数一（2）", 3],
+  ]);
+  const result = sortExamPaperQuestions("历年真题 / 数一 / 2009", [11, 12, 13], index);
+  assert.deepEqual(result.ids, [12, 13, 11]);
+  assert.deepEqual(result.missing, []);
+});
+
+test("serial 与题号相反时按题号排，不按 serial", () => {
+  const index = paperIndex([
+    [21, "2012数一（2）", 900],
+    [22, "2012数一（1）", 100],
+    [23, "2012数一（3）", 500],
+  ]);
+  const result = sortExamPaperQuestions("历年真题 / 数一 / 2012", [21, 22, 23], index);
+  assert.deepEqual(result.ids, [22, 21, 23]);
+});
+
+test("不同科目与年份各自成卷，不串排", () => {
+  const index = paperIndex([
+    [31, "2009数一（2）", 1], [32, "2009数一（1）", 2],
+    [33, "2009数二（1）", 3], [34, "2009数二（2）", 4],
+    [35, "2010数一（1）", 5],
+  ]);
+  assert.deepEqual(sortExamPaperQuestions("历年真题 / 数一 / 2009", [31, 32], index).ids, [32, 31]);
+  assert.deepEqual(sortExamPaperQuestions("历年真题 / 数二 / 2009", [33, 34], index).ids, [33, 34]);
+  // 2010 卷看不到 2009 的题，同一份索引换叶子就是另一套顺序
+  assert.deepEqual(sortExamPaperQuestions("历年真题 / 数一 / 2010", [35], index).ids, [35]);
+});
+
+test("跨卷共享题在每个叶子用该叶子的科目题号独立排序，不按 id 去重", () => {
+  const shared = [101, "2009数一二三（一6、二7、三5）", 10];
+  const index = paperIndex([shared,
+    [102, "2009数一（1）", 11], [103, "2009数一（7）", 12],
+    [104, "2009数二（1）", 13], [105, "2009数二（8）", 14]]);
+  // 数一：共享题是第 6 题，排在 1 与 7 之间
+  assert.deepEqual(sortExamPaperQuestions("历年真题 / 数一 / 2009", [102, 103, 101], index).ids, [102, 101, 103]);
+  // 数二：同一道题是第 7 题，排在 1 与 8 之间；两个叶子各自保留这条 id，不去重
+  assert.deepEqual(sortExamPaperQuestions("历年真题 / 数二 / 2009", [104, 105, 101], index).ids, [104, 101, 105]);
+});
+
+test("缺题号排在末尾并保持输入相对顺序，且随 refs 上报可审计", () => {
+  const index = paperIndex([
+    [41, "2005数一", 1],
+    [42, "2005数一（2）", 2],
+    [43, "2005数一", 3],
+    [44, "2005数一（1）", 4],
+  ]);
+  const result = sortExamPaperQuestions("历年真题 / 数一 / 2005", [41, 42, 43, 44], index);
+  assert.deepEqual(result.ids, [44, 42, 41, 43]);
+  assert.deepEqual(result.missing, [
+    { id: 41, path: "历年真题 / 数一 / 2005", source: "2005数一" },
+    { id: 43, path: "历年真题 / 数一 / 2005", source: "2005数一" },
+  ]);
+});
+
+test("非真题路径与真题聚合节点原样返回，不拿单卷题号去排", () => {
+  const index = paperIndex([[51, "2009数一（2）", 1], [52, "2009数一（1）", 2]]);
+  for (const path of ["高等数学 / 极限 / 计算", "历年真题", "历年真题 / 数一"]) {
+    const result = sortExamPaperQuestions(path, [51, 52], index);
+    assert.deepEqual(result.ids, [51, 52]);
+    assert.deepEqual(result.missing, []);
+  }
+});
+
 // --- 同步管线集成：官网 /api/categories 缺真题根，题目记录仍带真题路径 ---
 const OFFICIAL_CATEGORIES = [
   { id: 223, name: "高等数学", children: [{ id: 224, name: "极限", children: [] }] },
@@ -228,11 +348,48 @@ test("official sync rebuilds the missing 历年真题 subtree and files those qu
     assert.deepEqual(categoryQuestions[root.id].sort(), [2, 3, 4]);
     assert.deepEqual(categoryQuestions[numberOne.id].sort(), [2, 4]);
     assert.deepEqual(categoryQuestions[3510].sort(), [2, 4]);
+    // 这些 fixture 没有 source，题号必然缺失：叶子顺序保持原样，缺号必须上报而不是静默丢弃。
+    assert.deepEqual(categoryQuestions[3510], [2, 4]);
+    assert.deepEqual(result.missingPaperNumberRefs.map(item => [item.id, item.path]),
+      [[2, "历年真题 / 数一 / 2019"], [4, "历年真题 / 数一 / 2019"], [3, "历年真题 / 数二 / 2019"]]);
+    assert.equal(result.missingPaperNumberCount, 3);
     // 必需根 223/1/601 与可选根 2500 的既有语义不变：2500 在场但无题，分片为空。
     assert.deepEqual(categories.slice(0, 4).map(category => category.id), [223, 1, 601, 2500]);
     assert.equal(manifest.shards["模拟哥专区"].count, 0);
     assert.equal(manifest.shards["线性代数"].count, 0);
     assert.equal(manifest.shards["概率统计"].count, 0);
+  } finally {
+    restoreFetch();
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("真题叶子在目录生成阶段按卷内题号重排，缺号排在卷末并上报", async () => {
+  const sourced = (id, source) => officialQuestion(id, "历年真题 / 数一 / 2019", 3510, {
+    document: { question_type: "essay", stem_md: `题干${id}`, source,
+      answer: { reference_answer_md: `答案${id}` }, explanation_md: "" },
+  });
+  // 官网返回顺序与卷内题序无关：3、1、2，外加一条没有题号的。
+  const questions = [
+    sourced(5, "2019数一（3）"),
+    sourced(6, "2019数一（1）"),
+    sourced(7, "2019数一（2）"),
+    sourced(8, "2019数一"),
+  ];
+  const restoreFetch = stubOfficialFetch(questions, OFFICIAL_CATEGORIES);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-exam-order-sync-"));
+  const targetDir = path.join(temp, "target");
+  try {
+    await writeMappingFiles(targetDir);
+    const result = await syncOfficialQuestionBank({ targetDir });
+    const categoryQuestions = await readJson(path.join(targetDir, "category_questions.json"));
+    assert.deepEqual(categoryQuestions[3510], [6, 7, 5, 8]);
+    // 分片顺序保持官网返回顺序，本次改动不重排分片。
+    const shard = await readJson(path.join(targetDir, "shards/历年真题.json"));
+    assert.deepEqual(shard.map(item => item.id), [5, 6, 7, 8]);
+    assert.deepEqual(result.missingPaperNumberRefs,
+      [{ id: 8, path: "历年真题 / 数一 / 2019", source: "2019数一" }]);
+    assert.equal(result.missingPaperNumberCount, 1);
   } finally {
     restoreFetch();
     await fs.rm(temp, { recursive: true, force: true });
