@@ -2,7 +2,7 @@
   "use strict";
 
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
-    navigator.serviceWorker.register("./service-worker.js?v=165").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=170").catch(() => {});
   }
 
   const DATA = "./data";

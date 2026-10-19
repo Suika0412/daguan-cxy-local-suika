@@ -376,3 +376,105 @@ test("历史原章节失效时不跳到同题号的新章节，直达原题忽�
   assert.equal(call[4].requireTarget, true);
   assert.ok(!("ignoreFilters" in call[4]), "历史直达不得跳过严选/真题范围");
 });
+
+// 中间分类（如线性代数/方程组 2723）的 direct_questions 是空数组但 questions 有聚合题目；
+// 空数组为真值，不得让 `direct_questions || questions` 短路成空列表。
+test("中间分类直属题为空时回退到聚合题目，directOnly 仍只取直属", async () => {
+  const ui = loadNewUI();
+  ui.AppState.chapterScope = "all";
+  ui.AppState.filters = { sources: [], years: [], types: [], lecturers: [] };
+  ui.AppState.libraryQuery = "";
+  const aggregate = Array.from({ length: 73 }, (unused, index) => ({ id: index + 1, shard: "线性代数" }));
+  const chapter = { id: 2723, name: "方程组", direct_questions: [], questions: aggregate, children: [{ id: 2724 }] };
+
+  const merged = await ui.UIRenderer.filteredChapter(chapter);
+  assert.equal(merged.direct_questions.length, 73);
+
+  const direct = await ui.UIRenderer.filteredChapter(chapter, true);
+  assert.equal(direct.direct_questions.length, 0);
+
+  assert.equal(ui.DataService.chapterEntries(chapter).length, 73);
+  assert.equal(ui.DataService.chapterEntries(chapter, true).length, 0);
+});
+
+// 叶子分类的直属题非空时不得被聚合题目替换，保持原有行为。
+test("叶子分类直属题非空时仍只返回直属题", async () => {
+  const ui = loadNewUI();
+  ui.AppState.chapterScope = "all";
+  ui.AppState.filters = { sources: [], years: [], types: [], lecturers: [] };
+  ui.AppState.libraryQuery = "";
+  const chapter = {
+    id: 2725,
+    name: "判断解的情况",
+    direct_questions: [{ id: 435, shard: "线性代数" }, { id: 439, shard: "线性代数" }],
+    questions: [{ id: 435, shard: "线性代数" }, { id: 439, shard: "线性代数" }, { id: 441, shard: "线性代数" }],
+    children: [],
+  };
+
+  const merged = await ui.UIRenderer.filteredChapter(chapter);
+  assert.deepEqual(Array.from(merged.direct_questions, entry => entry.id), [435, 439]);
+  assert.equal(ui.DataService.chapterEntries(chapter).length, 2);
+});
+
+// 严选范围只隐藏点进去必然为空的目录项；完整/真题范围与当前路径上的选中节点保持原样。
+test("严选范围隐藏零题目录项，完整与真题范围保持显示，当前选中空节点保留", async () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  state.manifest = { shards: { high: { file: "shards/high.json" } } };
+  const questions = [
+    { id: 1, source: "基础练习", is_core: true },
+    { id: 2, source: "2022 数学一真题", is_core: false },
+  ];
+  ui.DataService.ensureShard = async () => new Map(questions.map(question => [question.id, question]));
+
+  const coreNode = { id: "core-node", name: "严选分组", question_count: 6, questions: [{ id: 1, shard: "high" }], children: [] };
+  const realNode = { id: "real-node", name: "真题分组", question_count: 4, questions: [{ id: 2, shard: "high" }], children: [] };
+  const emptyNode = { id: "empty", name: "空分组", question_count: 0, questions: [], children: [] };
+  const subject = {
+    id: "subject",
+    name: "高等数学",
+    question_count: 10,
+    questions: [{ id: 1, shard: "high" }, { id: 2, shard: "high" }],
+    children: [coreNode, realNode, emptyNode],
+  };
+  state.categories = { categories: [subject] };
+  state.currentCategory = subject;
+
+  await ui.UIRenderer.ensureScopeQuestionIds("core");
+  await ui.UIRenderer.ensureScopeQuestionIds("real");
+
+  state.chapterScope = "core";
+  assert.equal(ui.UIRenderer.scopeCountForNode(realNode), 0);
+  assert.equal(ui.UIRenderer.scopeCountForNode(emptyNode), 0);
+  assert.equal(ui.UIRenderer.scopeCountForNode(coreNode), 1);
+  assert.deepEqual(
+    Array.from(ui.UIRenderer.catalogColumns(subject, subject)[1].items, item => item.node.id),
+    ["core-node"],
+    "严选范围只保留题数大于 0 的目录项",
+  );
+
+  state.chapterScope = "all";
+  assert.deepEqual(
+    Array.from(ui.UIRenderer.catalogColumns(subject, subject)[1].items, item => item.node.id),
+    ["core-node", "real-node", "empty"],
+    "完整范围不受过滤影响，零题目录项照常显示",
+  );
+
+  state.chapterScope = "real";
+  assert.equal(ui.UIRenderer.scopeCountForNode(coreNode), 0);
+  assert.deepEqual(
+    Array.from(ui.UIRenderer.catalogColumns(subject, subject)[1].items, item => item.node.id),
+    ["core-node", "real-node", "empty"],
+    "真题范围不启用过滤，即使题数为 0 也照常显示",
+  );
+
+  state.chapterScope = "core";
+  const selectedEmpty = ui.UIRenderer.catalogColumns(subject, emptyNode);
+  assert.equal(selectedEmpty[1].selectedId, "empty");
+  assert.deepEqual(
+    Array.from(selectedEmpty[1].items, item => item.node.id),
+    ["core-node", "empty"],
+    "当前路径上的零题节点即便被选中也必须保留，同级零题兄弟仍然隐藏",
+  );
+  assert.equal(selectedEmpty[1].items.find(item => item.node.id === "empty").questionCount, 0);
+});

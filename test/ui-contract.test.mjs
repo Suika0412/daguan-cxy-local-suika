@@ -116,8 +116,8 @@ test("Service Worker 不预缓存首屏之外的大型索引和字体", () => {
   assert.ok(legacyScript); assert.ok(sw.includes(JSON.stringify(legacyScript)));
   assert.match(sw, /"\.\/guides\.css\?v=2"/);
   assert.match(sw, /"\.\/styles-new\.css\?v=127"/);
-  assert.match(sw, /"\.\/ui-version\.js\?v=106"/);
   assert.match(sw, /"\.\/ui-version\.js\?v=107"/);
+  assert.match(sw, /"\.\/ui-version\.js\?v=108"/);
   assert.match(sw, /"\.\/source-taxonomy\.js\?v=1"/);
   const newScript = newHtml.match(/src="(\.\/app-new\.js\?v=\d+)"/)?.[1];
   assert.ok(newScript); assert.ok(sw.includes(JSON.stringify(newScript)));
@@ -126,6 +126,24 @@ test("Service Worker 不预缓存首屏之外的大型索引和字体", () => {
   assert.doesNotMatch(sw, /data\/(category_questions|id_index|search_index)\.json/);
   assert.match(sw, /pathname\.includes\("\/data\/"\)/);
   assert.doesNotMatch(sw, /vendor\/fonts\//);
+});
+
+// 缓存失效契约：CACHE 升版后，三处 SW 注册必须同步到同一版本，
+// 且 activate 仍会清理旧的 daguan-shell-* 缓存，避免用户继续跑旧 app-new.js。
+test("Service Worker 版本升级时三处注册同步且旧缓存被淘汰", () => {
+  const sw = fs.readFileSync(new URL("../web/service-worker.js", import.meta.url), "utf8");
+  const version = sw.match(/const CACHE = "daguan-shell-v(\d+)"/)?.[1];
+  assert.ok(version, "CACHE 必须使用版本化名称");
+  assert.notEqual(version, "168", "修复 filteredChapter 后必须提升缓存版本，否则旧 app-new.js 仍被复用");
+
+  for (const file of ["app-new.js", "app-legacy.js", "app2.js"]) {
+    const source = fs.readFileSync(new URL(`../web/${file}`, import.meta.url), "utf8");
+    assert.ok(source.includes(`service-worker.js?v=${version}`),
+      `${file} 的 SW 注册版本必须等于 CACHE 版本 v${version}`);
+  }
+
+  assert.match(sw, /keys\.filter\(\(key\) => key\.startsWith\("daguan-shell-"\) && key !== CACHE\)/);
+  assert.match(sw, /caches\.delete\(key\)/);
 });
 
 test("新版与旧版都监听本地服务状态事件并刷新共享学习记录", () => {
@@ -140,7 +158,7 @@ test("新版与旧版都监听本地服务状态事件并刷新共享学习记�
 
 test("新版入口承载新版前端并与旧版共享版本选择", () => {
   assert.match(newHtml, /styles-new\.css\?v=127/);
-  assert.match(newHtml, /ui-version\.js\?v=107/);
+  assert.match(newHtml, /ui-version\.js\?v=108/);
   assert.match(newHtml, /ui-bootstrap\.js\?v=1/);
   assert.match(newHtml, /source-taxonomy\.js\?v=1/);
   assert.match(newHtml, /app-new\.js\?v=\d+/);

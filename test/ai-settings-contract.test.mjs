@@ -500,14 +500,14 @@ test("页面与 Service Worker 引用同步到新版本", () => {
   assert.ok(sw.includes('"./ai-services.css?v=3"'));
   assert.ok(sw.includes('"./new-ai.js?v=4"'));
   assert.ok(sw.includes('"./new-state.js?v=3"'));
-  assert.match(sw, /daguan-shell-v168/);
-  assert.ok(indexHtml.includes("./app-new.js?v=156"));
+  assert.match(sw, /daguan-shell-v170/);
+  assert.ok(indexHtml.includes("./app-new.js?v=158"));
   assert.ok(legacyHtml.includes("./app-legacy.js?v=122"));
-  assert.ok(sw.includes('"./app-new.js?v=156"'));
+  assert.ok(sw.includes('"./app-new.js?v=158"'));
   assert.ok(sw.includes('"./app-legacy.js?v=122"'));
   // app-new 与 app-legacy 都跟随新缓存版本。
-  assert.ok(fs.readFileSync(new URL("../web/app-new.js", import.meta.url), "utf8").includes("service-worker.js?v=168"));
-  assert.ok(fs.readFileSync(new URL("../web/app-legacy.js", import.meta.url), "utf8").includes("service-worker.js?v=168"));
+  assert.ok(fs.readFileSync(new URL("../web/app-new.js", import.meta.url), "utf8").includes("service-worker.js?v=170"));
+  assert.ok(fs.readFileSync(new URL("../web/app-legacy.js", import.meta.url), "utf8").includes("service-worker.js?v=170"));
 });
 
 test("双界面 AI 入口接线完整（防止抽屉/清空/档位/会话函数被误删）", () => {

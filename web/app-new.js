@@ -5,7 +5,7 @@
 
 // ========== 离线缓存注册（与 app2.js 一致） ==========
 if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=168").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=170").catch(() => {});
 }
 
 // ========== 全局状态 ==========
@@ -777,6 +777,8 @@ class UIRenderer {
         let parent = null;
         for (let depth = 0; ; depth += 1) {
             const selected = activePath[depth] || null;
+            // 严选范围下隐藏题数为 0 的目录项，避免点进去必然为空；当前路径上的节点必须保留。
+            const hideEmptyItems = AppState.chapterScope === 'core';
             columns.push({
                 depth,
                 parent,
@@ -788,7 +790,7 @@ class UIRenderer {
                     hasChildren: !!(node.children || []).length,
                     questionCount: this.scopeCountForNode(node),
                     directCount: this.scopeCountForNode(node, true),
-                })),
+                })).filter(item => !hideEmptyItems || item.selected || item.questionCount > 0),
                 directNode: parent && (parent.children || []).length && (parent.direct_questions || parent.questions || []).length ? parent : null,
             });
             if (!selected || !(selected.children || []).length) break;
@@ -911,15 +913,21 @@ class UIRenderer {
 
     // ignoreDetails：只放行范围，忽略来源/年份/题型/讲师与搜索词（用于从历史、搜索回到指定题）。
     static async filteredChapter(chapter, directOnly = false, { ignoreDetails = false } = {}) {
-        const entries = directOnly ? (chapter.direct_questions || []) : (chapter.direct_questions || chapter.questions || []);
-        const shell = { ...chapter, direct_questions: entries, children: [] };
+        // 中间分类（direct_count 为 0）的 direct_questions 是空数组；空数组为真值，
+        // 若直接用 `direct_questions || questions` 会短路成空列表。判据统一放在
+        // DataService.chapterEntries，避免这里与取题路径出现两套语义。
+        const entries = DataService.chapterEntries(chapter, directOnly);
+        // questions 必须与 direct_questions 同为已过滤结果：否则筛掉全部题目后，
+        // chapterEntries 的回退会重新拿到未过滤的旧 questions，导致筛选被绕过。
+        const shell = { ...chapter, direct_questions: entries, questions: entries, children: [] };
         const hasScope = AppState.chapterScope !== 'all';
         const hasDetails = !ignoreDetails && Object.values(AppState.filters || {}).some(values => Array.isArray(values) && values.length > 0);
         const hasQuery = !ignoreDetails && String(AppState.libraryQuery || '').trim().length > 0;
         if (!hasScope && !hasDetails && !hasQuery) return shell;
         const loaded = await DataService.loadQuestionsForChapter(shell);
         const acceptedIds = new Set(loaded.filter(question => this.scopeAllowsQuestion(question) && (ignoreDetails || this.detailsMatch(question))).map(question => String(question.id)));
-        return { ...shell, direct_questions: entries.filter(entry => acceptedIds.has(String(entry.id))) };
+        const kept = entries.filter(entry => acceptedIds.has(String(entry.id)));
+        return { ...shell, direct_questions: kept, questions: kept };
     }
 
     static renderChapterPicker() {

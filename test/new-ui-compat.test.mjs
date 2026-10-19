@@ -1125,7 +1125,12 @@ test("上一题、下一题跨子节，跳过筛选为空的小节并保留模�
   AppState.questionMode = 'single';
   AppState.currentView = 'question';
   App.ensureSavedBeforeLeavingQuestion = async () => true;
-  UIRenderer.filteredChapter = async node => ({ ...node, direct_questions: node.id === 'empty' ? [] : node.questions });
+  // filteredChapter 返回的 questions 与 direct_questions 同为过滤结果（见 app-new.js），
+  // 因此「筛选为空」必须把两者一起清空，否则 chapterEntries 会回退到未过滤的 questions。
+  UIRenderer.filteredChapter = async node => {
+    const kept = node.id === 'empty' ? [] : node.questions;
+    return { ...node, direct_questions: kept, questions: kept };
+  };
   const transitions = [];
   const rewards = [];
   sandbox.DaguanSectionCelebration = { show: (name, id) => rewards.push(id) };

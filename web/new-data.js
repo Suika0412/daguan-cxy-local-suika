@@ -128,7 +128,7 @@ class DataService {
     }
 
     static async loadQuestionsForChapter(chapter) {
-        const entries = chapter.direct_questions || chapter.questions || [];
+        const entries = this.chapterEntries(chapter);
         if (!entries.length) return [];
         const byShard = new Map();
         entries.forEach(e => {
@@ -145,8 +145,13 @@ class DataService {
         return out;
     }
 
-    static chapterEntries(chapter) {
-        return chapter?.direct_questions || chapter?.questions || [];
+    // 中间分类（direct_count 为 0）的 direct_questions 是空数组，
+    // 空数组为真值，不能用 `direct_questions || questions` 短路成空列表。
+    // 判据：非空直属题优先；空数组回退到聚合的 questions；叶子分类直属题非空时行为不变。
+    static chapterEntries(chapter, directOnly = false) {
+        const own = chapter?.direct_questions || [];
+        if (directOnly) return own;
+        return own.length ? own : (chapter?.questions || []);
     }
 
     // 多题阅读只取目标 20 题；深处定位不会先构造前面的题目对象或卡片。
