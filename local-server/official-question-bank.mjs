@@ -65,14 +65,24 @@ async function fetchOfficial(signal) {
   return { questions, categories, total };
 }
 
+// 分片名与根分类名一一对应（223/1/601 必需根 + 836/2500 可选根）。
+const shardNames = new Set(shardByRoot.values());
+
 function categoryIndex(categories) {
   const byId = new Map();
-  function visit(category, parent = null, rootId = category.id, prefix = "") {
+  // rootName 供 buildCatalog 按名称解析分片：合成出来的真题根不再是 836，
+  // 只按 ID 查表会让真题找不到分片。
+  function visit(category, parent = null, rootId = null, rootName = null, prefix = "") {
     const name = String(category.name || "");
     const id = Number(category.id);
     if (!Number.isInteger(id) || byId.has(id)) throw new Error(`官网分类 ID 不合法或重复：${category.id}`);
-    byId.set(id, { source: category, parent, rootId, path: prefix ? `${prefix} / ${name}` : name });
-    for (const child of category.children || []) visit(child, id, rootId, byId.get(id).path);
+    const resolvedRootId = rootId ?? id;
+    const resolvedRootName = rootName ?? name;
+    byId.set(id, { source: category, parent, rootId: resolvedRootId, rootName: resolvedRootName,
+      path: prefix ? `${prefix} / ${name}` : name });
+    for (const child of category.children || []) {
+      visit(child, id, resolvedRootId, resolvedRootName, byId.get(id).path);
+    }
   }
   for (const rootCategory of categories) visit(rootCategory);
   // 只强制必需根分类；可选板块缺失时其分片按空数组生成。
@@ -80,6 +90,197 @@ function categoryIndex(categories) {
     if (!byId.has(rootId) || byId.get(rootId).parent !== null) throw new Error(`官网缺少预期根分类 ${rootId}`);
   }
   return byId;
+}
+
+// 真题（历年真题）分类树重建。官网 /api/categories 已下线真题子树，而 /api/questions 仍返回
+// 约 1300 道真题，其分类路径形如「历年真题 / 数一 / 2019」，叶子 category_id 仍是官网
+// 给出的真题叶子分类。旧快照的 836/837/855/873 等 ID 已与当前记录错配，一律不复用：
+// 只按记录自带的路径字符串补回缺失的根/中间节点，叶子保留官方 ID，题目本身不改动。
+// 调用顺序：必须在 sanitizeOfficialCategories 之前，否则叶子引用会被判悬空而丢弃。
+//
+// 路径字段取自官网原始记录：category_full_path 优先，其次 category_name。
+// 官网的 category_name 存的就是完整路径（last_study 读回 shape
+// { has_record, category_id, category_name, category_full_path, ... } 见
+// local-server/sync-format.mjs 与 test/local-server.test.mjs）。本地的 category_path
+// 是 normalizeQuestion 的产物，原始快照里没有，不能当成输入字段。
+const examRootCategoryName = "历年真题";
+const examSubjectNames = ["数一", "数二", "数三"];
+const examYearCategoryPattern = /^\d{4}$/;
+const categoryPathFields = ["category_full_path", "category_name"];
+// 合成 ID 专用区间：官网当前分类 ID 最大 2766，本地 overlay 用 9900001-9900408，
+// 合成 ID 落在 980000000-980999999，与两者都不相交；同一路径每次得到同一 ID。
+const reservedCategoryIdRanges = [[1, 99_999], [9_900_000, 9_999_999]];
+const synthesizedCategoryIdBase = 980_000_000;
+const synthesizedCategoryIdCount = 1_000_000;
+
+export function synthesizedCategoryId(categoryPath, reservedIds = new Set()) {
+  const text = String(categoryPath ?? "").trim();
+  if (!text) throw new Error("合成分类 ID 需要非空路径");
+  const id = synthesizedCategoryIdBase + (createHash("sha256").update(text, "utf8")
+    .digest().readUIntBE(0, 6) % synthesizedCategoryIdCount);
+  if (reservedCategoryIdRanges.some(([minimum, maximum]) => id >= minimum && id <= maximum)) {
+    throw new Error(`合成分类 ID ${id} 落入保留区间：${text}`);
+  }
+  if (reservedIds.has(id)) throw new Error(`合成分类 ID ${id} 与已占用分类 ID 冲突：${text}`);
+  return id;
+}
+
+// 分类树的 ID→路径索引。与 categoryIndex 的差别：不做官网必需根分类检查，
+// 供合成前后的树使用。ID 不合法或重复仍显式失败。
+function categoryPaths(categories) {
+  const pathById = new Map();
+  function visit(category, prefix) {
+    const id = Number(category?.id);
+    const path = prefix ? `${prefix} / ${String(category?.name ?? "")}` : String(category?.name ?? "");
+    if (!Number.isInteger(id) || pathById.has(id)) throw new Error(`分类 ID 不合法或重复：${category?.id}`);
+    pathById.set(id, path);
+    for (const child of category.children || []) visit(child, path);
+  }
+  for (const category of categories) visit(category, "");
+  return pathById;
+}
+
+// 路径切分：容忍首尾斜杠与空格差异，保留原层级顺序；中间出现空层级视为格式损坏，
+// 由调用方判定（真题路径要求恰好三层）。
+function splitCategoryPath(text) {
+  const segments = String(text ?? "").split("/").map(segment => segment.trim());
+  if (segments[0] === "") segments.shift();
+  if (segments[segments.length - 1] === "") segments.pop();
+  return segments;
+}
+
+// 读取官方记录的分类路径。两个已确认字段都缺失时返回 null，由调用方按“是否可能属于
+// 已下线的真题树”决定放行或显式失败；两个字段同时存在但内容不一致必须报错，不挑一个算了。
+// 返回 { text, normalized }：text 用于报错，normalized 是稳定最小表示，同时用于 fingerprint。
+function officialCategoryPathOf(question) {
+  const values = [];
+  for (const field of categoryPathFields) {
+    const value = question?.[field];
+    if (value == null) continue;
+    if (typeof value !== "string") throw new Error(`题目 ${question.id} 的 ${field} 不是字符串`);
+    const text = value.trim();
+    const normalized = text ? splitCategoryPath(text).join(" / ") : "";
+    if (!normalized) continue;
+    if (!values.some(item => item.normalized === normalized)) values.push({ field, text, normalized });
+  }
+  if (values.length > 1) {
+    throw new Error(`题目 ${question.id} 的分类路径字段互相冲突：` +
+      values.map(item => `${item.field}「${item.text}」`).join("、"));
+  }
+  return values[0] ? { text: values[0].text, normalized: values[0].normalized } : null;
+}
+
+// 只认「历年真题 / 数一|数二|数三 / 四位年份」三层路径；非真题记录返回 null 原样保留。
+// 同一记录带多个真题路径、层级或科目/年份不合法都显式失败，不做猜测。
+function examCategoryPathOf(question, path) {
+  const candidates = path.normalized.split("、").map(text => splitCategoryPath(text))
+    .filter(segments => segments[0] === examRootCategoryName);
+  if (!candidates.length) return null;
+  if (candidates.length > 1) throw new Error(`题目 ${question.id} 带有多个真题路径：${path.text}`);
+  const segments = candidates[0];
+  if (segments.length !== 3) {
+    throw new Error(`题目 ${question.id} 的真题路径不是「${examRootCategoryName} / 科目 / 年份」三层：${path.text}`);
+  }
+  const [, subject, year] = segments;
+  if (!examSubjectNames.includes(subject)) throw new Error(`题目 ${question.id} 的真题科目不合法：${subject}`);
+  if (!examYearCategoryPattern.test(year)) throw new Error(`题目 ${question.id} 的真题年份不是四位年份：${year}`);
+  return { subject, year, path: segments.join(" / "), subjectPath: `${examRootCategoryName} / ${subject}` };
+}
+
+export function synthesizeExamCategoryTree(snapshot) {
+  if (!Array.isArray(snapshot?.questions) || !Array.isArray(snapshot?.categories)) {
+    throw new Error("真题分类合成需要 questions 与 categories 数组");
+  }
+  const categories = structuredClone(snapshot.categories);
+  const pathById = categoryPaths(categories);
+  // 先按记录建立「路径 ↔ 官方叶子 ID」一一对应；冲突即官网结构异常。
+  const examEntries = [];
+  const leafIdByPath = new Map();
+  const pathByLeafId = new Map();
+  for (const question of snapshot.questions) {
+    const path = officialCategoryPathOf(question);
+    if (path == null) {
+      // 没有路径时不能一律当成非真题静默跳过：真题子树已从 /api/categories 下线，
+      // 若该题引用了一个格式合法、却不在官网分类树上的分类，极可能就是真题记录，必须显式失败。
+      // 0、负数、NaN 等损坏值不在此判定：留给 sanitizeOfficialCategories 报它原有的错误。
+      const unknownCategoryIds = [...new Set([question.category_id,
+        ...(Array.isArray(question.category_ids) ? question.category_ids : [])]
+        .filter(id => id != null).map(Number))]
+        .filter(id => Number.isInteger(id) && id > 0 && !pathById.has(id));
+      if (unknownCategoryIds.length) {
+        throw new Error(`题目 ${question.id} 缺少分类路径字段（${categoryPathFields.join(" / ")}），` +
+          `且分类 ${unknownCategoryIds.join("、")} 不在官网分类树中，无法判断是否真题`);
+      }
+      continue;
+    }
+    const parsed = examCategoryPathOf(question, path);
+    if (!parsed) continue;
+    const leafId = Number(question.category_id);
+    if (!Number.isInteger(leafId) || leafId <= 0) {
+      throw new Error(`题目 ${question.id} 的真题路径缺少官方叶子分类 ID：${parsed.path}`);
+    }
+    const knownLeafId = leafIdByPath.get(parsed.path);
+    if (knownLeafId != null && knownLeafId !== leafId) {
+      throw new Error(`真题路径 ${parsed.path} 对应多个官方叶子分类 ID：${knownLeafId}、${leafId}`);
+    }
+    const knownPath = pathByLeafId.get(leafId);
+    if (knownPath != null && knownPath !== parsed.path) {
+      throw new Error(`真题叶子分类 ID ${leafId} 对应多个路径：${knownPath}、${parsed.path}`);
+    }
+    leafIdByPath.set(parsed.path, leafId);
+    pathByLeafId.set(leafId, parsed.path);
+    examEntries.push({ ...parsed, leafId });
+  }
+  const reservedIds = new Set(pathById.keys());
+  for (const leafId of pathByLeafId.keys()) reservedIds.add(leafId);
+  const findChild = (children, name, path) => {
+    const matches = children.filter(child => String(child?.name ?? "") === name);
+    if (matches.length > 1) throw new Error(`分类路径重复：${path}`);
+    return matches[0] || null;
+  };
+  const createNode = (name, path, id) => {
+    if (pathById.has(id)) throw new Error(`分类 ID 已被占用：${id}（${pathById.get(id)}）`);
+    pathById.set(id, path);
+    reservedIds.add(id);
+    return { id, name, children: [] };
+  };
+  let examRoot = null;
+  if (examEntries.length) {
+    examRoot = findChild(categories, examRootCategoryName, examRootCategoryName);
+    if (!examRoot) {
+      examRoot = createNode(examRootCategoryName, examRootCategoryName,
+        synthesizedCategoryId(examRootCategoryName, reservedIds));
+      categories.push(examRoot);
+    }
+    examRoot.children ||= [];
+    const yearsBySubject = new Map(examSubjectNames.map(name => [name, new Set()]));
+    for (const entry of examEntries) yearsBySubject.get(entry.subject).add(entry.year);
+    for (const subject of examSubjectNames) {
+      const years = [...yearsBySubject.get(subject)];
+      if (!years.length) continue;
+      const subjectPath = `${examRootCategoryName} / ${subject}`;
+      let subjectNode = findChild(examRoot.children, subject, subjectPath);
+      if (!subjectNode) {
+        subjectNode = createNode(subject, subjectPath, synthesizedCategoryId(subjectPath, reservedIds));
+        examRoot.children.push(subjectNode);
+      }
+      subjectNode.children ||= [];
+      for (const year of years.sort()) {
+        const path = `${subjectPath} / ${year}`;
+        const leafId = leafIdByPath.get(path);
+        const leaf = findChild(subjectNode.children, year, path);
+        if (leaf) {
+          if (Number(leaf.id) !== leafId) {
+            throw new Error(`真题叶子分类 ID 与官方记录不一致：${path}（分类树 ${leaf.id}，题目记录 ${leafId}）`);
+          }
+          continue;
+        }
+        // 叶子保留官方 category_id；该 ID 若已被分类树其它位置占用，createNode 会显式失败。
+        subjectNode.children.push(createNode(year, path, leafId));
+      }
+    }
+  }
+  return { ...snapshot, categories, examRootId: examRoot ? Number(examRoot.id) : null };
 }
 
 export function applyLocalClassifications(snapshot, config) {
@@ -280,7 +481,11 @@ function buildCatalog(snapshot, refs) {
     }
     const question = normalized;
     const primary = categories.get(question.category_id) || categories.get(question.category_ids[0]);
-    const shard = primary ? shardByRoot.get(primary.rootId) : "未分类";
+    // 先按根 ID 查表（官网原样给出的 223/1/601/836/2500），再按根名兜底：
+    // 真题根由 synthesizeExamCategoryTree 合成，ID 不是 836，只能按名称归到「历年真题」分片。
+    const shard = primary
+      ? shardByRoot.get(primary.rootId) || (shardNames.has(primary.rootName) ? primary.rootName : null)
+      : "未分类";
     if (!shard) throw new Error(`题目 ${question.id} 找不到分片`);
     shards[shard].push(question);
     idIndex[question.id] = shard;
@@ -388,15 +593,21 @@ async function reconcileVideoMappings(stage, dataDir) {
 
 export async function syncOfficialQuestionBank({ targetDir, overlayDir = targetDir, fallbackAssetsDir = null, signal, currentFingerprint = null }) {
   const officialSnapshot = await fetchOfficial(signal);
+  // 官网原始分类路径（category_full_path / category_name）也要进指纹：真题子树已从
+  // /api/categories 下线，路径变化是本仓库能看到的唯一真题结构信号，漏掉会被误判 unchanged。
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    questions: officialSnapshot.questions.map(question => [question.id, question.content_hash, question.is_core, question.category_ids, question.category_id]),
+    questions: officialSnapshot.questions.map(question => [question.id, question.content_hash, question.is_core,
+      question.category_ids, question.category_id, officialCategoryPathOf(question)?.normalized ?? null]),
     categories: officialSnapshot.categories,
   })).digest("hex");
   if (fingerprint === currentFingerprint) return { unchanged: true, fingerprint, sourceTotal: officialSnapshot.total };
-  // 顺序固定：官方快照分类净化 → 本地 overlay → 构建目录。净化先于 overlay，
-  // 保证 applyLocalClassifications 只见到净化后的官方引用，本地校验强度不变。
+  // 顺序固定：官网分类树校验 → 真题分类合成 → 官方快照分类净化 → 本地 overlay → 构建目录。
+  // 必需根（223/1/601）校验先行，缺根本身就是官网结构异常，不该被合成或净化的报错盖掉；
+  // 合成必须先于净化：真题叶子只存在于题目记录里，树不补齐就会被判悬空并丢弃。
   const refs = { strayCategoryRefs: [], strayPrimaryRefs: [], unclassifiedPrimaryRefs: [], incompleteQuestionRefs: [] };
-  const sanitized = sanitizeOfficialCategories(officialSnapshot, categoryIndex(officialSnapshot.categories), refs);
+  categoryIndex(officialSnapshot.categories);
+  const synthesized = synthesizeExamCategoryTree(officialSnapshot);
+  const sanitized = sanitizeOfficialCategories(synthesized, categoryIndex(synthesized.categories), refs);
   const snapshot = applyLocalClassifications(sanitized, await readLocalClassifications(overlayDir));
   const result = buildCatalog(snapshot, refs);
   const stage = await fs.mkdtemp(path.join(os.tmpdir(), "daguan-official-sync-"));

@@ -348,6 +348,7 @@ test("local category with an unknown non-optional parent still fails loudly", ()
 test("stray secondary category references are dropped with an observable warning while the primary category is kept", async () => {
   const strayed = {
     id: 140, category_id: 223, category_ids: [2510, 223], content_hash: "h140", is_core: false,
+    category_name: "分类223", category_full_path: "分类223",
     document: { question_type: "essay", stem_md: "矩阵题干", answer: { reference_answer_md: "答案" } },
   };
   const restoreFetch = stubOfficialFetch([strayed]);
@@ -409,6 +410,7 @@ test("malformed secondary category references still fail instead of being treate
 test("sanitized official snapshot passes applyLocalClassifications without stray references", async () => {
   const strayed = {
     id: 140, category_id: 223, category_ids: [2510, 223], content_hash: "h140", is_core: false,
+    category_name: "分类223", category_full_path: "分类223",
     document: { question_type: "essay", stem_md: "题干", answer: { reference_answer_md: "答案" } },
   };
   const restoreFetch = stubOfficialFetch([strayed]);
@@ -444,6 +446,7 @@ test("sanitized official snapshot passes applyLocalClassifications without stray
 test("invalid official primary survives applyLocalClassifications and is promoted downstream", async () => {
   const broken = {
     id: 189, category_id: 853, category_ids: [853, 2709], content_hash: "h189", is_core: false,
+    category_name: "分类853", category_full_path: "分类853",
     document: { question_type: "essay", stem_md: "题干", answer: { reference_answer_md: "答案" } },
   };
   // 2709 必须挂在 223 之下，否则 rootId 不在 shardByRoot 中会触发「找不到分片」。
@@ -485,6 +488,7 @@ test("local assignment introducing a non-existent category still fails", () => {
 test("invalid primary with a valid secondary category is promoted to that category", async () => {
   const broken = {
     id: 141, category_id: 9999, category_ids: [9999, 601, 223], content_hash: "h141", is_core: false,
+    category_name: "分类9999", category_full_path: "分类9999",
     document: { question_type: "essay", stem_md: "题干", answer: { reference_answer_md: "答案" } },
   };
   const restoreFetch = stubOfficialFetch([broken]);
@@ -518,6 +522,7 @@ test("invalid primary with a valid secondary category is promoted to that catego
 test("invalid primary without any valid category keeps the question unclassified", async () => {
   const broken = {
     id: 143, category_id: 8888, category_ids: [8888, 7777], content_hash: "h143", is_core: false,
+    category_name: "分类8888", category_full_path: "分类8888",
     document: { question_type: "essay", stem_md: "题干", answer: { reference_answer_md: "答案" } },
   };
   const restoreFetch = stubOfficialFetch([broken]);

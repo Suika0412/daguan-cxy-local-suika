@@ -1,27 +1,27 @@
 {
   "version": 1,
-  "total": 7471,
+  "total": 7470,
   "types": {
-    "subjective": 5341,
+    "subjective": 5340,
     "single_choice": 2125,
     "multiple_choice": 5
   },
   "shards": {
     "高等数学": {
       "file": "shards/高等数学.json",
-      "count": 4053
+      "count": 3457
     },
     "线性代数": {
       "file": "shards/线性代数.json",
-      "count": 997
+      "count": 820
     },
     "概率统计": {
       "file": "shards/概率统计.json",
-      "count": 706
+      "count": 547
     },
     "历年真题": {
       "file": "shards/历年真题.json",
-      "count": 0
+      "count": 1322
     },
     "模拟哥专区": {
       "file": "shards/模拟哥专区.json",
@@ -29,12 +29,12 @@
     },
     "未分类": {
       "file": "shards/未分类.json",
-      "count": 1715
+      "count": 1324
     }
   },
   "asset_count": 1250,
   "asset_base": "./data/assets/",
-  "synced_at": "2026-10-18T10:45:57.868Z",
+  "synced_at": "2026-10-19T05:20:55.142Z",
   "source": "https://www.cxyonly.fans/math",
-  "source_total": 7083
+  "source_total": 7082
 }
