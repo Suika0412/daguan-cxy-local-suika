@@ -104,3 +104,58 @@ test('完整事件备份恢复原首次学习，旧备份基线不生成活动�
   assert.equal((await store.summary(options)).metrics.firstPass, 1);
   assert.ok((await store.export()).baseline['2']);
 });
+
+test('战报按 state 清除代次落盘清空并保留 started_at，写失败显式传播且可同代次重试', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'daguan-study-generation-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  let state = { progress: {}, reset_generation: 0 };
+  const store = createStudyActivity(temp, async () => state);
+  await store.ensure();
+  await store.append([event(1, 'answer', '2026-09-30T08:00:00Z')]);
+  await store.observeImport({ progress: { 2: { mastery: 'learning' } } });
+  const first = await store.export();
+  assert.equal(first.reset_generation, 0, '旧战报缺代次按 0 兼容');
+  assert.equal(Object.keys(first.events).length, 1);
+  assert.ok(first.baseline['2']);
+
+  // 落后一个代次时磁盘写失败：显式抛错，磁盘仍保留旧代次与旧事件
+  state = { ...state, reset_generation: 1 };
+  const blocker = path.join(temp, `study-activity.json.tmp-${process.pid}`);
+  await fs.mkdir(blocker);
+  await assert.rejects(store.export);
+  const stale = JSON.parse(await fs.readFile(path.join(temp, 'study-activity.json'), 'utf8'));
+  assert.equal(stale.reset_generation, 0);
+  assert.equal(Object.keys(stale.events).length, 1);
+  await fs.rm(blocker, { recursive: true, force: true });
+
+  // 同一代次重试成功：events/baseline 落盘清空，started_at 保留，revision 单调递增
+  const cleared = await store.clear();
+  assert.equal(cleared.cleared, true);
+  assert.equal(cleared.reset_generation, 1);
+  assert.equal(cleared.started_at, first.started_at);
+  assert.ok(cleared.revision > first.revision);
+  const afterClear = await store.export();
+  assert.deepEqual(afterClear.events, {});
+  assert.deepEqual(afterClear.baseline, {});
+  assert.equal(afterClear.reset_generation, 1);
+
+  // 读时已自愈后再调用不再产生一次无意义写入
+  const again = await store.clear();
+  assert.equal(again.cleared, false);
+  assert.equal(again.revision, cleared.revision);
+  assert.equal(again.reset_generation, 1);
+
+  // 代次继续前进后新事件可正常写入，旧事件不复活
+  state = { ...state, reset_generation: 2 };
+  const fresh = event(3, 'answer', '2026-09-30T09:00:00Z');
+  await store.append([fresh]);
+  const written = await store.export();
+  assert.deepEqual(Object.keys(written.events), [fresh.event_id]);
+  assert.equal(written.reset_generation, 2);
+
+  // 战报代次高于 state：显式失败且不覆盖磁盘数据
+  state = { ...state, reset_generation: 1 };
+  await assert.rejects(store.export, error => error.code === 'ACTIVITY_GENERATION_AHEAD');
+  const ahead = JSON.parse(await fs.readFile(path.join(temp, 'study-activity.json'), 'utf8'));
+  assert.deepEqual(Object.keys(ahead.events), [fresh.event_id]);
+});

@@ -5,7 +5,7 @@
 
 // ========== 离线缓存注册（与 app2.js 一致） ==========
 if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=170").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=171").catch(() => {});
 }
 
 // ========== 全局状态 ==========
@@ -2141,6 +2141,17 @@ class UIRenderer {
                 <div class="card tool-card">
                     <div class="tool-row">
                         <div class="tool-info">
+                            <h2 class="text-section-title">清除本机做题记录</h2>
+                            <p>清除逐题练习结果、掌握状态、错题标记、继续学习位置，以及学习手账与战报事件和历史基线。收藏、批注、选题、学习备忘、浏览历史、AI 配置与官网数据都会保留；之后主动同步官网或恢复备份仍可能把旧记录导回。建议先用上方“下载备份”保存一份当前记录。</p>
+                        </div>
+                        <button type="button" class="btn btn-secondary" id="btn-clear-progress">清除做题记录</button>
+                    </div>
+                    <div class="tool-result" id="clear-progress-result" role="status" aria-live="polite"></div>
+                </div>
+
+                <div class="card tool-card">
+                    <div class="tool-row">
+                        <div class="tool-info">
                             <h2 class="text-section-title">合并旧浏览器记录</h2>
                             <p>先预览差异并下载当前记录备份，再按逐题修改时间合并进度、收藏、批注和学习位置。外观、快捷键与 AI 草稿不会迁移。</p>
                         </div>
@@ -2231,6 +2242,7 @@ class UIRenderer {
         document.getElementById('btn-migration-apply')?.addEventListener('click', () => UIRenderer.applyLegacyMigration());
         document.getElementById('btn-migration-cancel')?.addEventListener('click', () => UIRenderer.cancelLegacyMigration());
         document.getElementById('btn-stop-local-service')?.addEventListener('click', () => UIRenderer.stopLocalBrowserService());
+        document.getElementById('btn-clear-progress')?.addEventListener('click', () => App.clearProgressWithConfirm());
     }
 
     static async stopLocalBrowserService() {
@@ -2266,7 +2278,7 @@ class UIRenderer {
             if (!response.ok) throw new Error('无法读取当前本地学习记录');
             const target = await response.json();
             const preview = window.DaguanBackupMigration.merge(source, target);
-            this.pendingLegacyMigration = { fileName: file.name, source, target, targetRevision: Number(target.revision) || 0, preview };
+            this.pendingLegacyMigration = { fileName: file.name, source, target, targetRevision: Number(target.revision) || 0, targetGeneration: StateSync.progressReset().generationOf(target), preview };
             const c = preview.counts;
             if (output) output.innerHTML = `<p><strong>${escapeHtml(file.name)}</strong>：将迁入进度 ${c.importedProgress} 项、收藏 ${c.importedFavorites} 项、批注 ${c.importedAnnotations} 项${c.importedPosition ? '，学习位置 1 项' : ''}。</p><p>当前端优先保留：进度 ${c.keptTargetProgress} 项，收藏 ${c.keptTargetFavorites} 项，批注 ${c.keptTargetAnnotations} 项。时间缺失或相同的冲突保留当前端。</p><p class="text-helper">外观、快捷键、AI 草稿及旧版选题不会导入。请先下载并保存当前记录备份。</p>`;
             confirmation?.classList.remove('hidden');
@@ -2310,11 +2322,15 @@ class UIRenderer {
             const latestResponse = await fetch('./api/state', { cache: 'no-store' });
             if (!latestResponse.ok) throw new Error('无法重新读取当前记录');
             const latest = await latestResponse.json();
-            if ((Number(latest.revision) || 0) !== pending.targetRevision) {
+            // 握手：页面代次先与服务端对齐，预览是否作废由 revision 与清除代次共同判定。
+            const previewGeneration = Number.isInteger(pending.targetGeneration) ? pending.targetGeneration : null;
+            const { generation } = StateSync.absorbRemote(latest);
+            if ((Number(latest.revision) || 0) !== pending.targetRevision || previewGeneration === null || generation !== previewGeneration) {
                 const preview = window.DaguanBackupMigration.merge(pending.source, latest);
-                this.pendingLegacyMigration = { ...pending, target: latest, targetRevision: Number(latest.revision) || 0, preview };
+                this.pendingLegacyMigration = { ...pending, target: latest, targetRevision: Number(latest.revision) || 0, targetGeneration: generation, preview };
                 const c = preview.counts;
-                if (output) output.innerHTML = `<p>当前记录在预览后发生了变化，已按最新状态重新计算：将迁入进度 ${c.importedProgress} 项、收藏 ${c.importedFavorites} 项、批注 ${c.importedAnnotations} 项${c.importedPosition ? '，学习位置 1 项' : ''}。</p><p>请再次下载当前记录备份、确认已保存，然后重新确认合并。</p>`;
+                const cleared = generation !== previewGeneration;
+                if (output) output.innerHTML = `${cleared ? '<p>做题记录已在预览后被清除，此前的预览结果作废。</p>' : ''}<p>当前记录在预览后发生了变化，已按最新状态重新计算：将迁入进度 ${c.importedProgress} 项、收藏 ${c.importedFavorites} 项、批注 ${c.importedAnnotations} 项${c.importedPosition ? '，学习位置 1 项' : ''}。</p><p>请再次下载当前记录备份、确认已保存，然后重新确认合并。</p>`;
                 document.getElementById('migration-backup-saved').checked = false;
                 document.getElementById('migration-backup-saved').disabled = true;
                 if (document.getElementById('btn-migration-backup')) document.getElementById('btn-migration-backup').focus();
@@ -2324,8 +2340,9 @@ class UIRenderer {
             const write = await fetch('./api/state', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json', 'If-Match': String(pending.targetRevision) },
-                body: JSON.stringify({ ...result, revision: pending.targetRevision }),
+                body: JSON.stringify({ ...result, revision: pending.targetRevision, reset_generation: previewGeneration }),
             });
+            if (write.status === 428) throw new Error('做题记录已被清除，本次合并结果作废，请重新预览并备份');
             if (write.status === 409) throw new Error('当前记录刚刚被另一个窗口更新，请重新预览并备份');
             if (!write.ok) throw new Error(`合并写入失败（HTTP ${write.status}）`);
             const c = pending.preview.counts;
@@ -3623,6 +3640,43 @@ class App {
         if (!hidden && panelId === 'sync-panel') this.syncStatus();
     }
 
+    // 清除本机做题记录：二次确认后才调用共享清除动作；失败/部分完成必须如实显示。
+    static async clearProgressWithConfirm() {
+        if (this.clearingProgress) return;
+        const button = document.getElementById('btn-clear-progress');
+        const result = document.getElementById('clear-progress-result');
+        if (button && button.disabled) return;
+        const answer = prompt('将清除本机的逐题练习结果、掌握状态、错题标记、继续学习位置，以及学习手账与战报事件和历史基线。\n收藏、批注、选题、学习备忘、浏览历史、AI 配置与官网数据会保留；之后同步官网或恢复备份仍可能把旧记录导回。\n建议先下载当前记录备份。此操作不可撤销。\n\n请输入“清除”继续：');
+        if (answer !== '清除') {
+            if (result) result.textContent = '已取消，未发送任何请求。';
+            return;
+        }
+        this.clearingProgress = true;
+        if (button) button.disabled = true;
+        if (result) result.textContent = '正在清除本机做题记录…';
+        try {
+            await StateSync.clearProgress();
+            if (result) result.textContent = '已清除本机做题记录与学习战报事件、历史基线。';
+            this.setToolStatus('本机做题记录已清除。', 'success');
+            this.refreshPracticeViews();
+        } catch (error) {
+            const label = error && error.partial ? '部分完成' : error && error.unknown ? '结果未知' : '清除失败';
+            const message = `${label}：${error?.message || '请稍后重试'}`;
+            if (result) result.textContent = message;
+            this.setToolStatus(message, 'error');
+        } finally {
+            this.clearingProgress = false;
+            if (button) button.disabled = false;
+        }
+    }
+
+    // 清除后刷新与练习记录相关的视图（首页进度/继续学习、手账战报）；工具页本身保留状态文字。
+    static refreshPracticeViews() {
+        UIRenderer.studyJournal = null;
+        if (AppState.currentView === 'home') UIRenderer.renderHome();
+        else if (AppState.currentView === 'records') UIRenderer.renderRecords();
+    }
+
     static setToolStatus(message, kind = '') {
         const el = document.getElementById('tool-status');
         if (!el) return;
@@ -3900,6 +3954,16 @@ document.getElementById('btn-dl').addEventListener('click', function () {
             return;
         }
         if (!confirm(`确定用 ${file.name} 覆盖当前的做题进度、收藏和批注吗？此操作不可撤销。`)) {
+            input.value = '';
+            return;
+        }
+
+        // 先在服务端确认当前清除代次与可用性：失败时本地与回滚快照都不动，也不声称恢复成功。
+        try {
+            StateSync.absorbRemote(await StateSync.readState());
+            StateSync.available = true;
+        } catch (error) {
+            this.setToolStatus(`恢复失败：无法确认本地学习记录状态（${error.message || '请稍后重试'}），当前数据未改动`, 'error');
             input.value = '';
             return;
         }

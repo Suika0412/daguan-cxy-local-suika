@@ -2,7 +2,7 @@
   "use strict";
 
   if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=170").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=171").catch(() => {});
   }
 
   const DATA = "./data";
@@ -546,6 +546,202 @@
   let pendingReplayTimer = 0;
   let pendingReplayAttempts = 0;
 
+  // 清除代次：服务端拥有，本页单独记住已确认值；缺少共享 helper 时显式失败，不静默兜底。
+  let serverResetGeneration = null;
+  let learningWritesPaused = false;
+  let lastStudyInFlight = null;
+
+  function resetFailure(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function resetApi() {
+    const api = window.DaguanVersions && window.DaguanVersions.progressReset;
+    if (!api) throw resetFailure("PROGRESS_RESET_UNAVAILABLE", "缺少共享清除代次模块，已停止学习记录写入");
+    return api;
+  }
+
+  // 学习写入必须绑定发起时的代次：内存与共享 helper 不一致时不得发出，避免旧内存写进新代次。
+  function captureResetGeneration() {
+    const generation = resetApi().capture();
+    if (serverResetGeneration === null || serverResetGeneration !== generation) {
+      throw resetFailure("PROGRESS_RESET_MEMORY_STALE", "本页清除代次已过期，正在重新同步，请稍后重试");
+    }
+    return generation;
+  }
+
+  // IDB 进度缓存与清除代次绑定：缓存只在其代次与本页固定代次一致时才允许并入。
+  function cacheResetGeneration() {
+    return serverResetGeneration === null ? resetApi().stored() : serverResetGeneration;
+  }
+
+  // 代次前进后旧练习上下文整体失效：清空旧队列/索引/分类/继续学习指针，题目与列表视图回首页。
+  // 不重绘旧题，避免 renderSingle/renderFeed 这类渲染顺带 markSeen 造出新练习记录。
+  function exitStalePracticeContext() {
+    state.queue = [];
+    state.index = 0;
+    state.currentCatId = null;
+    state.specialQueue = null;
+    state.last_study = null;
+    if (state.view === "browse") goHome();
+  }
+
+  // 代次前进：用服务端进度替换旧内存，丢弃旧练习队列与定时器；收藏与批注保留。
+  function applyProgressReset(remote) {
+    serverRevision = Number(remote && remote.revision) || 0;
+    state.progress = { ...((remote && remote.progress) || {}) };
+    state.last_study = (remote && remote.last_study) || null;
+    state.remote_activity = (remote && remote.remote_activity) || null;
+    serverQuestionQueue.clear();
+    if (serverQuestionTimer) { clearTimeout(serverQuestionTimer); serverQuestionTimer = 0; }
+    pendingReplayAttempts = 0;
+    exitStalePracticeContext();
+    try { sessionStorage.removeItem(POSITION_KEY); } catch { /* 会话存储不可用时位置已由内存状态归零 */ }
+    flushPersist();
+    // 旧练习队列作废，但待同步日志里的收藏/批注意图必须保留并继续重放。
+    if (!learningWritesPaused && pendingHasAny()) replayPendingSync();
+    toast("本机做题记录已被清除，已刷新页面数据。");
+  }
+
+  // 采纳服务端代次并自己比对本页内存：学习活动客户端可能已提前 adopt 同一次前进，
+  // 所以不能用 helper 的 changed 判断本页是否需要作废旧内存。
+  function adoptServerGeneration(remoteState) {
+    const adopted = resetApi().adopt(remoteState);
+    const previous = serverResetGeneration;
+    serverResetGeneration = adopted.generation;
+    const changed = previous === null ? adopted.generation > 0 : previous !== adopted.generation;
+    if (changed) applyProgressReset(remoteState);
+    return { generation: adopted.generation, changed };
+  }
+
+  // 写入响应里的服务端状态：采纳并失效旧练习；旧 payload 不换代次重发。
+  function adoptResetResponse(remoteState) {
+    if (!remoteState || typeof remoteState !== "object") return;
+    try {
+      const adopted = resetApi().adopt(remoteState);
+      serverResetGeneration = adopted.generation;
+      applyProgressReset(remoteState);
+    } catch (error) {
+      console.error("[legacy] 采纳服务端清除状态失败", error);
+      void hydrateServerState();
+    }
+  }
+
+  async function fetchServerState() {
+    const response = await fetch("./api/state", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw resetFailure("STATE_HANDSHAKE_FAILED", `状态握手失败（HTTP ${response.status}）`);
+    return response.json();
+  }
+
+  // 清除前等已发出的逐题/位置写入给出结果（只在飞请求，不清定时器假装完成）。
+  // 在飞 promise 永不结算时按剩余时间显式超时，不能无限等待；失败已由其自身记录，这里继续等其余写入。
+  async function waitForLearningWrites() {
+    const deadline = Date.now() + 10000;
+    while (lastStudyInFlight || serverStateSyncing) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw resetFailure("PROGRESS_RESET_BUSY", "学习记录仍在保存，请稍后重试");
+      if (!lastStudyInFlight) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, remaining)));
+        continue;
+      }
+      let timer = 0;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(resetFailure("PROGRESS_RESET_BUSY", "等待最近学习位置写入超时，请稍后重试")), remaining);
+      });
+      try {
+        await Promise.race([lastStudyInFlight.catch((error) => {
+          console.error("[legacy] 等待在飞的最近学习位置写入失败", error);
+        }), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  // 清除做题记录与进度（只提供能力，界面由后续任务接入）：成功后本页内存、队列、位置一并归零。
+  async function clearProgress() {
+    if (learningWritesPaused) throw resetFailure("PROGRESS_RESET_BUSY", "正在清除或保存做题记录，请稍后再试");
+    const api = resetApi();
+    const study = window.DaguanStudyActivity;
+    if (!study || typeof study.pauseForReset !== "function" || typeof study.resumeAfterReset !== "function") {
+      throw resetFailure("PROGRESS_RESET_UNAVAILABLE", "缺少学习记录客户端，已停止清除");
+    }
+    learningWritesPaused = true;
+    try {
+      await waitForLearningWrites();
+      await study.pauseForReset();
+      // 先握手核对 revision 与代次：不能凭旧缓存推断，也不能复活旧事件。
+      const snapshot = await fetchServerState();
+      const before = serverResetGeneration;
+      const adopted = api.adopt(snapshot);
+      if (adopted.generation !== before) {
+        serverResetGeneration = adopted.generation;
+        applyProgressReset(snapshot);
+        throw resetFailure("PROGRESS_RESET_CHANGED", "本机记录已在其他窗口被清除，已刷新页面数据，请重新确认后再操作");
+      }
+      serverRevision = Number(snapshot.revision) || serverRevision;
+      const generation = api.capture();
+      let response;
+      try {
+        response = await fetch("./api/state/clear-progress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "If-Match": String(serverRevision) },
+          body: JSON.stringify({ revision: serverRevision, reset_generation: generation }),
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch (cause) {
+        // 响应丢失：先 GET 核对代次，服务端已提交就按部分完成显式上报，绝不假装成功。
+        const verified = await fetchServerState().catch(() => null);
+        if (verified) {
+          const after = api.adopt(verified);
+          if (after.generation !== generation) {
+            serverResetGeneration = after.generation;
+            applyProgressReset(verified);
+            throw resetFailure("PROGRESS_RESET_PARTIAL", "清除请求的响应丢失，服务端已提交清除；学习手账与战报会在下次访问时补完清理，请稍后重新打开页面。");
+          }
+        }
+        throw resetFailure("PROGRESS_RESET_UNKNOWN", `清除请求结果未知（${cause.message || cause}），本地记录保留，请重试`);
+      }
+      if (response.status === 409) {
+        const payload = await response.json().catch(() => ({}));
+        if (payload.current) serverRevision = Number(payload.current.revision) || serverRevision;
+        throw resetFailure("PROGRESS_RESET_CONFLICT", "本地状态已变化，未执行清除，请刷新页面后重新确认");
+      }
+      if (response.status === 428) {
+        const payload = await response.json().catch(() => ({}));
+        adoptResetResponse(payload.current);
+        throw resetFailure("PROGRESS_RESET_REQUIRED", "本机记录已被清除，已刷新页面数据，请重新确认后再操作");
+      }
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const verified = await fetchServerState();
+        const after = api.adopt(verified);
+        if (after.generation !== generation) {
+          serverResetGeneration = after.generation;
+          applyProgressReset(verified);
+          throw resetFailure("PROGRESS_RESET_PARTIAL", `做题记录已清除，但学习手账与战报清理未完成：${payload.error || `HTTP ${response.status}`}。本地记录不重建，请稍后重新打开页面让服务补完清理。`);
+        }
+        throw resetFailure("PROGRESS_RESET_FAILED", `清除失败：${payload.error || `HTTP ${response.status}`}。本地记录未删除，请重试`);
+      }
+      const payload = await response.json();
+      const settled = api.adopt(payload.state);
+      serverResetGeneration = settled.generation;
+      applyProgressReset(payload.state);
+      return { cleared: true, generation: settled.generation, revision: Number(payload.revision) || serverRevision };
+    } finally {
+      learningWritesPaused = false;
+      // 恢复后重放仍挂着的待同步收藏/批注意图（清除期间只入队，不能随旧练习一起丢）。
+      if (pendingHasAny()) replayPendingSync();
+      // 恢复学习记录写入；失败保留原队列并显式上报，不改写清除结果。
+      study.resumeAfterReset().catch((error) => {
+        console.error("[legacy] 清除后恢复学习记录写入失败", error);
+        toast("学习记录恢复写入失败，未提交的学习记录仍保留在本机，将自动重试。");
+      });
+    }
+  }
+
   function openIdb() {
     if (idbPromise) return idbPromise;
     if (!window.indexedDB) {
@@ -600,6 +796,32 @@
           } catch {
             resolve();
           }
+        })
+    );
+  }
+
+  // 进度缓存与它的清除代次必须同一事务落盘：否则“旧进度仍在、新代次戳已写”会让旧练习冒充新代次。
+  function idbSetPracticeCache(progress, generation) {
+    return openIdb().then(
+      (db) =>
+        new Promise((resolve, reject) => {
+          if (!db) {
+            reject(resetFailure("IDB_UNAVAILABLE", "IndexedDB 不可用，未能写入进度缓存及其代次"));
+            return;
+          }
+          let transaction;
+          try {
+            transaction = db.transaction("kv", "readwrite");
+            const store = transaction.objectStore("kv");
+            store.put(progress, "progress");
+            store.put(generation, "reset_generation");
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error || resetFailure("IDB_WRITE_FAILED", "进度缓存写入失败"));
+          transaction.onabort = () => reject(transaction.error || resetFailure("IDB_WRITE_ABORTED", "进度缓存写入被中止"));
         })
     );
   }
@@ -673,6 +895,13 @@
     try {
       saveAiDraft();
       if (previewPrivateAllowed(false)) {
+      // 切换前先握手：flush 必须使用最新代次，不能把旧内存写进新代次。
+      try {
+        adoptServerGeneration(await fetchServerState());
+      } catch (error) {
+        console.error("[legacy] 切换界面前的清除代次握手失败，本次不写本机服务", error);
+        serverStateAvailable = false;
+      }
       clearTimeout(noteSaveTimer);
       if (noteSaveInFlight) await noteSaveInFlight;
       if (noteDirty || (state.aiOpen && state.aiTab === "note")) await saveQuestionNote();
@@ -691,7 +920,14 @@
         await Promise.race([flushQuestionSync(), new Promise((_, reject) => setTimeout(() => reject(new Error("保存超时，请重试")), 10000))]);
         if (serverQuestionQueue.size) throw new Error("学习记录未能保存到本地服务，请重试");
       }
-      await Promise.all([idbSet("progress", state.progress), idbSet("picked", [...state.picked]), idbSet("favorites", [...state.favorites]), idbSet("annotations", state.annotations)]);
+      await Promise.all([idbSetPracticeCache(state.progress, cacheResetGeneration()).catch(error => {
+        // 无 IndexedDB 时按既有离线能力继续切版，但必须明确报不可用；其他失败照常抛出。
+        if (error && error.code === "IDB_UNAVAILABLE") {
+          console.error("[legacy] IndexedDB 不可用，切换界面未更新进度缓存代次（仅 localStorage 可用）");
+          return;
+        }
+        throw error;
+      }), idbSet("picked", [...state.picked]), idbSet("favorites", [...state.favorites]), idbSet("annotations", state.annotations)]);
       }
       saveLearningPosition(true);
       localStorage.setItem(versions.selectionKey, version);
@@ -876,11 +1112,16 @@
     } catch {
       /* ignore */
     }
-    idbSet("progress", state.progress);
     idbSet("picked", [...state.picked]);
     idbSet("favorites", [...state.favorites]);
     idbSet("annotations", state.annotations);
     idbSet("saved_at", Date.now());
+    // 进度与其代次同事务落盘；失败必须显式报告，不能假装缓存已对齐。
+    idbSetPracticeCache(state.progress, cacheResetGeneration()).catch(error => {
+      console.error("[legacy]", error && error.code === "IDB_UNAVAILABLE"
+        ? "IndexedDB 不可用，本机进度缓存未写入代次（仅 localStorage 可用）"
+        : `进度缓存代次写入失败：${error && error.message ? error.message : error}`);
+    });
     // Node 状态文件是权威源；浏览器存储只负责离线缓存。
   }
 
@@ -891,13 +1132,24 @@
 
   async function hydrateStores() {
     if (!previewPrivateAllowed(false)) return;
+    // 读缓存前先固定本页代次：缓存属于该代次，服务端代次前进后必须整体作废而不是合并。
+    if (serverResetGeneration === null) serverResetGeneration = resetApi().stored();
     try {
-      const [p, pick, savedAt] = await Promise.all([
+      const [p, pick, savedAt, idbGeneration] = await Promise.all([
         idbGet("progress"),
         idbGet("picked"),
         idbGet("saved_at"),
+        idbGet("reset_generation"),
       ]);
-      if (!serverStateAvailable && p && typeof p === "object") state.progress = mergeProgress(state.progress, p);
+      // 旧缓存没有代次键时按 0 处理：代次不符就整体作废，绝不把旧练习并进当前代次。
+      const rawGeneration = Number(idbGeneration);
+      const cachedGeneration = Number.isInteger(rawGeneration) && rawGeneration >= 0 ? rawGeneration : 0;
+      const cacheMatches = cachedGeneration === serverResetGeneration;
+      if (!serverStateAvailable && cacheMatches && p && typeof p === "object") state.progress = mergeProgress(state.progress, p);
+      if (!cacheMatches) {
+        // 代次不符：用当前进度与当前代次原子覆盖，避免“旧进度仍在、新戳已写”的中间态。
+        await idbSetPracticeCache(state.progress, serverResetGeneration);
+      }
       if (!serverStateAvailable && Array.isArray(pick)) {
         for (const id of pick) state.picked.add(String(id));
       }
@@ -909,8 +1161,10 @@
       if (!serverStateAvailable && annotations && typeof annotations === "object") state.annotations = { ...state.annotations, ...annotations };
       if (savedAt) state.savedAt = savedAt;
       flushPersist();
-    } catch {
-      /* stay on localStorage */
+    } catch (error) {
+      // 读取或对齐失败：保留 localStorage 现有能力，但不推进 IDB 代次戳（无法确认缓存已对齐）。
+      console.error("[legacy] 本机进度缓存读取/对齐失败，未更新缓存代次：", error && error.message ? error.message : error);
+      return;
     }
   }
 
@@ -923,12 +1177,18 @@
       const response = await fetch("./api/state", { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const remote = await response.json();
+      // 代次前进说明本机记录已被清除：必须用服务端进度替换旧内存，不能再做并集合并。
+      const reset = adoptServerGeneration(remote);
       const journal = pendingJournal();
-      if (remote?.progress && typeof remote.progress === "object") state.progress = mergeProgress(remote.progress, state.progress);
-      if (Array.isArray(remote?.favorites)) state.favorites = new Set(remote.favorites.map(String));
-      if (Array.isArray(remote?.picked)) state.picked = new Set(remote.picked.map(String));
-      if (remote?.annotations && typeof remote.annotations === "object") state.annotations = { ...remote.annotations };
-      // 待同步的本地编辑（新版离线/写入失败时产生）优先于服务端旧值，不能被刷新覆盖掉。
+      if (!reset.changed) {
+        if (remote?.progress && typeof remote.progress === "object") state.progress = mergeProgress(remote.progress, state.progress);
+        if (Array.isArray(remote?.favorites)) state.favorites = new Set(remote.favorites.map(String));
+        if (Array.isArray(remote?.picked)) state.picked = new Set(remote.picked.map(String));
+        if (remote?.annotations && typeof remote.annotations === "object") state.annotations = { ...remote.annotations };
+        state.remote_activity = remote.remote_activity || null;
+        state.last_study = remote.last_study || null;
+      }
+      // 待同步的本地收藏/批注意图优先于服务端旧值，代次前进后也必须保留。
       for (const [id, entry] of Object.entries(journal.questions || {})) {
         const patch = entry && entry.patch;
         if (!patch || !Object.keys(patch).length) continue;
@@ -975,25 +1235,30 @@
       const response = await fetch("./api/state", { cache: "no-store" });
       if (!response.ok) return;
       const remote = await response.json();
+      // 先采纳代次：清除后 revision 也可能相同，只有代次能证明旧缓存失效。
+      const reset = adoptServerGeneration(remote);
       const remoteRevision = Number(remote.revision) || 0;
-      if (remoteRevision <= serverRevision && serverStateAvailable) return;
-      const previousProgress = state.progress;
-      const previousAnnotations = state.annotations;
-      state.progress = mergeProgress(remote.progress || {}, previousProgress);
-      state.favorites = new Set((remote.favorites || []).map(String));
-      for (const [id, entry] of Object.entries(previousProgress || {})) {
-        const localAt = timestampOf(entry?.favorite_updated_at || entry?.updated_at);
-        const remoteAt = timestampOf(remote.progress?.[id]?.favorite_updated_at || remote.progress?.[id]?.updated_at);
-        if (localAt > remoteAt && typeof entry?.favorite === "boolean") {
-          if (entry.favorite) state.favorites.add(String(id)); else state.favorites.delete(String(id));
+      if (!reset.changed && remoteRevision <= serverRevision && serverStateAvailable) return;
+      const previousProgress = reset.changed ? {} : state.progress;
+      const previousAnnotations = reset.changed ? {} : state.annotations;
+      state.progress = reset.changed ? { ...(remote.progress || {}) } : mergeProgress(remote.progress || {}, previousProgress);
+      // 代次前进时收藏/批注是本机保留项，不用服务端值或旧时间戳再改一次。
+      if (!reset.changed) {
+        state.favorites = new Set((remote.favorites || []).map(String));
+        for (const [id, entry] of Object.entries(previousProgress || {})) {
+          const localAt = timestampOf(entry?.favorite_updated_at || entry?.updated_at);
+          const remoteAt = timestampOf(remote.progress?.[id]?.favorite_updated_at || remote.progress?.[id]?.updated_at);
+          if (localAt > remoteAt && typeof entry?.favorite === "boolean") {
+            if (entry.favorite) state.favorites.add(String(id)); else state.favorites.delete(String(id));
+          }
         }
-      }
-      state.annotations = { ...(remote.annotations || {}) };
-      for (const [id, entry] of Object.entries(previousAnnotations || {})) {
-        const localAt = timestampOf(entry?.updated_at);
-        const remoteAt = timestampOf(remote.annotations?.[id]?.updated_at);
-        const isEditing = noteDirty && String(currentAiQuestion()?.id || "") === String(id);
-        if (isEditing || localAt > remoteAt) state.annotations[id] = entry;
+        state.annotations = { ...(remote.annotations || {}) };
+        for (const [id, entry] of Object.entries(previousAnnotations || {})) {
+          const localAt = timestampOf(entry?.updated_at);
+          const remoteAt = timestampOf(remote.annotations?.[id]?.updated_at);
+          const isEditing = noteDirty && String(currentAiQuestion()?.id || "") === String(id);
+          if (isEditing || localAt > remoteAt) state.annotations[id] = entry;
+        }
       }
       state.remote_activity = remote.remote_activity || null;
       state.last_study = remote.last_study || null;
@@ -1057,7 +1322,7 @@
   }
 
   async function replayPendingAnnotations() {
-    if (!serverStateAvailable || !PendingSync || pendingAnnotationSyncing) return;
+    if (learningWritesPaused || !serverStateAvailable || !PendingSync || pendingAnnotationSyncing) return;
     pendingAnnotationSyncing = true;
     try {
       for (const id of Object.keys(pendingJournal().annotations || {})) {
@@ -1095,7 +1360,7 @@
 
   // 把待同步日志里尚未确认的逐题编辑重新排队（离线期间的收藏/错题/掌握度编辑）
   function replayPendingSync() {
-    if (!serverStateAvailable || !PendingSync) return;
+    if (learningWritesPaused || !serverStateAvailable || !PendingSync) return;
     try {
       const journal = pendingJournal();
       for (const [id, entry] of Object.entries(journal.questions || {})) {
@@ -1118,6 +1383,8 @@
     serverQuestionQueue.set(key, { ...(serverQuestionQueue.get(key) || {}), ...patch });
     // 本机已写入、服务端未确认 → 记入待同步日志（内存队列刷新即丢，日志不丢）
     if (PendingSync) { try { PendingSync.queueQuestion(key, patch); } catch {} }
+    // 清除期间只入队与记日志：失败时原样保留，成功时代次前进会整队作废。
+    if (learningWritesPaused) return;
     if (serverStateAvailable && serverStateHydrated) {
       if (serverQuestionTimer) clearTimeout(serverQuestionTimer);
       serverQuestionTimer = setTimeout(flushQuestionSync, 350);
@@ -1126,18 +1393,34 @@
 
   async function flushQuestionSync() {
     serverQuestionTimer = 0;
-    if (!serverStateAvailable || serverStateSyncing || !serverQuestionQueue.size) return;
+    if (learningWritesPaused || !serverStateAvailable || serverStateSyncing || !serverQuestionQueue.size) return;
+    // 每次发送都绑定发起时的代次；内存代次与共享 helper 不一致时不发，交给重新握手修正。
+    let generation;
+    try {
+      generation = captureResetGeneration();
+    } catch (error) {
+      console.error("[legacy] 逐题写入被清除代次阻止", error);
+      if (error.code === "PROGRESS_RESET_MEMORY_STALE") void hydrateServerState();
+      return;
+    }
     serverStateSyncing = true;
     const entries = [...serverQuestionQueue.entries()];
     serverQuestionQueue.clear();
     const requeue = () => entries.forEach(([id, patch]) => serverQuestionQueue.set(id, { ...patch, ...(serverQuestionQueue.get(id) || {}) }));
     try {
       for (const [id, patch] of entries) {
+        if (learningWritesPaused) { requeue(); break; }
         const response = await fetch(`./api/state/questions/${encodeURIComponent(id)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json", "If-Match": String(serverRevision) },
-          body: JSON.stringify({ ...patch, revision: serverRevision, updated_at: new Date().toISOString() }),
+          body: JSON.stringify({ ...patch, revision: serverRevision, reset_generation: generation, updated_at: new Date().toISOString() }),
         });
+        if (response.status === 428) {
+          // 服务端已清除：采纳 current 作废旧练习，不给旧 payload 换新代次重发。
+          const payload = await response.json().catch(() => ({}));
+          adoptResetResponse(payload.current);
+          break;
+        }
         if (response.status === 409) {
           const conflict = await response.json().catch(() => ({}));
           if (conflict.current) {
@@ -1150,6 +1433,11 @@
         }
         if (!response.ok) throw new Error(`状态写入失败（HTTP ${response.status}）`);
         const result = await response.json();
+        if (!resetApi().isCurrent(generation)) {
+          // 响应已属于旧代次：禁止写回内存/缓存，交给重新握手。
+          adoptResetResponse(result.state);
+          break;
+        }
         serverRevision = Number(result.revision) || serverRevision;
         if (PendingSync) { try { PendingSync.clearQuestion(id, patch); } catch {} }
       }
@@ -3887,8 +4175,14 @@ function videoExplanationMarkup(q) {
       const response = await fetch(`${LOCAL_API_PREFIX}/state/migrate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ progress: state.progress, favorites: [...state.favorites], picked: [...state.picked], annotations: state.annotations }),
+        body: JSON.stringify({ progress: state.progress, favorites: [...state.favorites], picked: [...state.picked], annotations: state.annotations, reset_generation: captureResetGeneration() }),
       });
+      if (response.status === 409) throw new Error("本地状态已变化，请重新确认后再导入");
+      if (response.status === 428) {
+        const payload = await response.json().catch(() => ({}));
+        adoptResetResponse(payload.current);
+        throw new Error("本机做题记录已被清除，请刷新页面后重新确认再导入");
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();
       serverStateAvailable = true;
@@ -4036,17 +4330,38 @@ function videoExplanationMarkup(q) {
   }
 
   function queueLastStudyPosition() {
-    if (!serverStateAvailable || !serverStateHydrated || !state.currentCatId || !currentQ()) return;
+    if (learningWritesPaused || !serverStateAvailable || !serverStateHydrated || !state.currentCatId || !currentQ()) return;
+    let generation;
+    try {
+      generation = captureResetGeneration();
+    } catch (error) {
+      console.error("[legacy] 最近学习位置写入被清除代次阻止", error);
+      return;
+    }
     state.last_study = { category_id: state.currentCatId, question_id: String(currentQ().id), mode: state.mode, updated_at: new Date().toISOString() };
-    fetch("./api/state/last-study", {
+    const request = fetch("./api/state/last-study", {
       method: "PATCH",
       headers: { "Content-Type": "application/json", "If-Match": String(serverRevision) },
-      body: JSON.stringify({ ...state.last_study, revision: serverRevision }),
+      body: JSON.stringify({ ...state.last_study, revision: serverRevision, reset_generation: generation }),
     }).then(async (response) => {
-      if (!response.ok) return;
+      if (response.status === 428) {
+        const payload = await response.json().catch(() => ({}));
+        adoptResetResponse(payload.current);
+        return;
+      }
+      if (!response.ok) {
+        if (!resetApi().isCurrent(generation)) void hydrateServerState();
+        return;
+      }
       const result = await response.json();
+      if (!resetApi().isCurrent(generation)) { adoptResetResponse(result.state); return; }
       serverRevision = Number(result.revision) || serverRevision;
-    }).catch(() => {});
+    }).catch((error) => {
+      console.error("[legacy] 最近学习位置写入失败", error);
+    }).finally(() => {
+      if (lastStudyInFlight === request) lastStudyInFlight = null;
+    });
+    lastStudyInFlight = request;
   }
 
   async function restoreLearningPosition() {
@@ -5851,6 +6166,45 @@ function videoExplanationMarkup(q) {
       const ok = await backupText().then(copyText).catch(() => false);
       toast(ok ? "已复制备份 JSON" : "复制失败，请改用下载");
     });
+    $("#btn-clear-progress").addEventListener("click", async () => {
+      if (!previewPrivateAllowed()) return;
+      const status = $("#clear-progress-status");
+      const confirmed = prompt("这会清除本机的做题记录与进度：逐题练习结果、掌握状态、错题标记、继续学习位置、学习手账与战报都会被删除，且不可撤销。\n收藏、批注、选题勾选、学习备忘、浏览历史、AI 配置与官网数据不受影响，也不会通知官网；之后主动同步官网或恢复备份仍可能重新导入这些记录。\n建议先点上方“下载备份”留一份。\n\n确认请完整输入“清除”：");
+      if (confirmed === null) return;
+      if (confirmed !== "清除") {
+        if (status) status.textContent = "输入不匹配，未执行清除。";
+        return;
+      }
+      const button = $("#btn-clear-progress");
+      if (button) button.disabled = true;
+      if (status) status.textContent = "正在清除做题记录与进度…";
+      try {
+        const result = await clearProgress();
+        updateStats();
+        refreshSyncStats();
+        refreshHomeSyncCard();
+        refreshPickUI();
+        renderMasteryChips();
+        renderListStrip();
+        if (state.view === "home") renderHome();
+        if (state.view === "browse") {
+          if (state.mode === "single") renderSingle();
+          else renderFeed(false);
+        }
+        if (!noteDirty && state.aiOpen && state.aiTab === "note") renderQuestionNote();
+        const text = `已清除做题记录与进度（版本 ${result.revision}、清除代次 ${result.generation}）。收藏、批注、选题与备忘保留。`;
+        if (status) status.textContent = text;
+        toast(text);
+      } catch (error) {
+        // 按具体原因显式呈现：partial / unknown 等不得显示成成功。
+        const text = `清除未完成：${error?.message || error}`;
+        if (status) status.textContent = text;
+        toast(text);
+        console.error("[legacy] 清除做题记录失败", error);
+      } finally {
+        if (button) button.disabled = false;
+      }
+    });
     $("#btn-share-progress").addEventListener("click", async () => {
       if (!previewPrivateAllowed()) return;
       const name = backupFilename();
@@ -6169,6 +6523,8 @@ function videoExplanationMarkup(q) {
       await replayPendingAnnotations();
       return !pendingHasAny() && !serverQuestionQueue.size && !serverStateSyncing;
     },
+    // 清除做题记录与进度：能力入口，交互由后续任务接入。
+    async clearProgress() { return clearProgress(); },
     async downloadBackup() {
       downloadText(backupFilename(), await backupText(), "application/json");
     },

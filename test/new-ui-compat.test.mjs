@@ -57,6 +57,8 @@ function createContext(initialStorage = {}) {
   vm.runInContext(fs.readFileSync(new URL("ui-version.js", root), "utf8"), sandbox, { filename: "ui-version.js" });
   loadNewUiModules(sandbox);
   vm.runInContext(fs.readFileSync(new URL("app-new.js", root), "utf8"), sandbox, { filename: "app-new.js" });
+  // 真实清除代次契约要求先确认代次：沙箱统一按初始代次 0 握手（adopt(0) 不改动任何存储）。
+  sandbox.window.DaguanVersions.progressReset.adopt({ reset_generation: 0 });
   return { sandbox, storage, session, localStorage, sessionStorage, document, documentListeners, appearanceVariables, warnings };
 }
 
@@ -990,7 +992,7 @@ test("离线批注与收藏记入待同步日志：恢复在线 hydrate 保留�
   // 待同步编辑已补写到服务端，且成功后才清除待同步状态
   assert.deepEqual(writes, [
     ["annotation", markdown, "5"],
-    ["question", { favorite: true, revision: 6, updated_at: writes[1][1].updated_at }, "6"],
+    ["question", { favorite: true, revision: 6, reset_generation: 0, updated_at: writes[1][1].updated_at }, "6"],
   ]);
   assert.equal(DaguanPendingSync.hasAny(), false);
   assert.equal(localStorage.getItem("daguan_pending_sync_v1"), null);
@@ -1279,4 +1281,161 @@ test("连续模式进入子节末题时向真实渲染器传递末题 ID", async
   sandbox.StateSync.pushLastStudy = async () => {};
   await App.enterChapterQuestions(chapter, 24, null, 'multi');
   assert.deepEqual(rendered, [20, 25]);
+});
+
+// ---------------------------------------------------------------------------
+// 显式导入契约适配：旧浏览器记录迁移与备份恢复都必须先握手，跨清除代次的旧预览作废。
+// ---------------------------------------------------------------------------
+function migrationElements(document) {
+  const backupButton = { focused: false, focus() { this.focused = true; } };
+  const confirmation = { hidden: false, classList: { add() { confirmation.hidden = true; }, remove() { confirmation.hidden = false; } } };
+  const elements = new Map([
+    ["migration-preview", { textContent: "", innerHTML: "" }],
+    ["migration-backup-saved", { checked: true, disabled: false }],
+    ["btn-migration-apply", { disabled: false }],
+    ["btn-migration-backup", backupButton],
+    ["migration-confirmation", confirmation],
+    ["tool-status", { textContent: "", className: "" }],
+  ]);
+  document.getElementById = id => elements.get(id) || null;
+  return { elements, backupButton };
+}
+
+const migrationCounts = { importedProgress: 1, importedFavorites: 0, importedAnnotations: 0, importedPosition: false, keptTargetProgress: 0, keptTargetFavorites: 0, keptTargetAnnotations: 0 };
+const migrationState = { progress: { 7: { mastery: "learning" } }, favorites: [], annotations: {}, picked: [], last_study: null };
+
+// 导入路径需要真实的清除代次事件能力（浏览器 window 自带 CustomEvent/dispatchEvent）
+function enableProgressResetEvents(sandbox) {
+  const listeners = new Map();
+  sandbox.CustomEvent = class { constructor(type, options) { this.type = type; this.detail = options?.detail; } };
+  sandbox.dispatchEvent = event => { for (const handler of listeners.get(event.type) || []) handler(event); return true; };
+  sandbox.addEventListener = (type, handler) => { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(handler); };
+}
+
+function setupMigrationSandbox() {
+  const context = createContext();
+  enableProgressResetEvents(context.sandbox);
+  const { elements } = migrationElements(context.document);
+  const { UIRenderer, PreviewAccess } = context.sandbox.window;
+  PreviewAccess.privateAllowed = () => true;
+  context.sandbox.window.DaguanBackupMigration = { merge: () => ({ state: migrationState, counts: migrationCounts }) };
+  return { ...context, elements, UIRenderer };
+}
+
+test("旧浏览器记录迁移：清除代次变化后旧预览作废，必须重新确认且不上传", async () => {
+  const { sandbox, elements, UIRenderer } = setupMigrationSandbox();
+  const putCalls = [];
+  sandbox.fetch = async (url, options = {}) => {
+    if ((options.method || "GET") === "GET") return okState(remoteState({ revision: 9, reset_generation: 2 }));
+    putCalls.push(JSON.parse(options.body));
+    return okState({ ok: true, revision: 10 });
+  };
+  UIRenderer.pendingLegacyMigration = { fileName: "old.json", source: {}, target: remoteState({ revision: 5, reset_generation: 1 }), targetRevision: 5, targetGeneration: 1, preview: { state: migrationState, counts: migrationCounts } };
+  await UIRenderer.applyLegacyMigration();
+  assert.equal(putCalls.length, 0, "清除后旧预览不得直接换新代次上传");
+  assert.equal(UIRenderer.pendingLegacyMigration.targetGeneration, 2);
+  assert.equal(UIRenderer.pendingLegacyMigration.targetRevision, 9);
+  assert.match(elements.get("migration-preview").innerHTML, /作废/);
+  assert.match(elements.get("migration-preview").innerHTML, /重新确认/);
+  assert.equal(elements.get("migration-backup-saved").checked, false, "必须重新确认备份");
+});
+
+test("旧浏览器记录迁移：PUT 携带预览确认时的清除代次，428 提示重新预览且不重发", async () => {
+  const run = async status => {
+    const { sandbox, elements, UIRenderer } = setupMigrationSandbox();
+    const puts = [];
+    sandbox.fetch = async (url, options = {}) => {
+      if ((options.method || "GET") === "GET") return okState(remoteState({ revision: 5, reset_generation: 1 }));
+      puts.push(JSON.parse(options.body));
+      if (status === 428) return { ok: false, status: 428, json: async () => ({ ok: false, code: "PROGRESS_RESET_REQUIRED", error: "做题记录已清除" }) };
+      return okState({ ok: true, revision: 6 });
+    };
+    UIRenderer.pendingLegacyMigration = { fileName: "old.json", source: {}, target: remoteState({ revision: 5, reset_generation: 1 }), targetRevision: 5, targetGeneration: 1, preview: { state: migrationState, counts: migrationCounts } };
+    await UIRenderer.applyLegacyMigration();
+    return { puts, elements, UIRenderer };
+  };
+  const applied = await run(200);
+  assert.equal(applied.puts.length, 1);
+  assert.equal(applied.puts[0].reset_generation, 1, "PUT 必须带预览确认时的代次");
+  assert.equal(applied.UIRenderer.pendingLegacyMigration, null);
+
+  const reset = await run(428);
+  assert.equal(reset.puts.length, 1, "428 不得自动重贴代次重发");
+  assert.equal(reset.puts[0].reset_generation, 1);
+  assert.match(reset.elements.get("migration-preview").textContent, /重新预览/);
+});
+
+test("恢复备份：清除拉高代次后仍可主动恢复，已确认文件按当前代次导入", async () => {
+  const { sandbox, localStorage, document } = createContext();
+  enableProgressResetEvents(sandbox);
+  document.getElementById = () => null;
+  const { App, PreviewAccess } = sandbox.window;
+  PreviewAccess.privateAllowed = () => true;
+  // 本地保留清除前的旧练习与旧代次戳：握手时必须先清掉，不能把旧练习带进新代次
+  localStorage.setItem("daguan_local_progress_v1", JSON.stringify({ "1": { mastery: "mastered", updated_at: "2026-09-01T00:00:00.000Z" } }));
+  localStorage.setItem("daguan_progress_reset_generation_v1", "1");
+  sandbox.confirm = () => true;
+  const puts = [];
+  sandbox.fetch = async (url, options = {}) => {
+    if ((options.method || "GET") === "GET") return okState(remoteState({ revision: 9, reset_generation: 2 }));
+    puts.push(JSON.parse(options.body));
+    return okState({ ok: true, revision: 10 });
+  };
+  const backup = { progress: { "9": { mastery: "learning", updated_at: "2026-10-05T00:00:00.000Z" } }, favorites: ["9"], annotations: {}, picked: [] };
+  const input = { files: [{ name: "backup.json", text: async () => JSON.stringify(backup) }], value: "" };
+  await App.restoreBackup(input);
+  assert.equal(puts.length, 1, "恢复后应把用户确认的文件推送到服务端");
+  assert.equal(puts[0].reset_generation, 2, "导入按当前代次入队");
+  assert.deepEqual(Object.keys(puts[0].progress), ["9"]);
+  const stored = JSON.parse(localStorage.getItem("daguan_local_progress_v1"));
+  assert.deepEqual(Object.keys(stored), ["9"], "旧代次练习不得残留，导入内容写入本机");
+});
+
+// ---------------------------------------------------------------------------
+// 新版清除交互（T9）：工具页独立危险卡 + App 薄方法，二次确认词不进 API。
+// ---------------------------------------------------------------------------
+test("清除做题记录：工具页有独立按钮并绑定 App 薄方法", () => {
+  const fsSource = fs.readFileSync(new URL("../web/app-new.js", import.meta.url), "utf8");
+  assert.match(fsSource, /id="btn-clear-progress"/, "工具页应有稳定的按钮 id");
+  assert.match(fsSource, /getElementById\('btn-clear-progress'\)\?\.addEventListener\('click', \(\) => App\.clearProgressWithConfirm\(\)\)/, "按钮必须绑定薄方法");
+  assert.match(fsSource, /static async clearProgressWithConfirm\(\)/);
+  assert.match(fsSource, /await StateSync\.clearProgress\(\)/);
+});
+
+test("清除做题记录：取消不发请求，成功与部分失败都如实显示并恢复按钮", async () => {
+  const { sandbox, document } = createContext();
+  enableProgressResetEvents(sandbox);
+  const button = { disabled: false };
+  const result = { textContent: "" };
+  const toolStatus = { textContent: "", className: "" };
+  const elements = new Map([["btn-clear-progress", button], ["clear-progress-result", result], ["tool-status", toolStatus]]);
+  document.getElementById = id => elements.get(id) || null;
+  const { App, AppState, StateSync } = sandbox.window;
+  AppState.currentView = "tools";
+  const calls = [];
+  StateSync.clearProgress = async () => {
+    calls.push("clear");
+    if (sandbox.nextClearError) throw sandbox.nextClearError;
+    return { revision: 7, reset_generation: 2, progress: {} };
+  };
+
+  sandbox.prompt = () => "清除吧";
+  await App.clearProgressWithConfirm();
+  assert.equal(calls.length, 0, "非精确确认词不得调用 API");
+  assert.match(result.textContent, /已取消/);
+  assert.equal(button.disabled, false);
+
+  sandbox.prompt = () => "清除";
+  await App.clearProgressWithConfirm();
+  assert.deepEqual(calls, ["clear"]);
+  assert.match(result.textContent, /已清除/);
+  assert.equal(toolStatus.className.includes("success"), true);
+  assert.equal(button.disabled, false, "结束后按钮必须恢复");
+
+  sandbox.nextClearError = Object.assign(new Error("做题进度已清除，学习记录未能确认清空"), { partial: true, code: "PROGRESS_CLEAR_PARTIAL" });
+  await App.clearProgressWithConfirm();
+  assert.match(result.textContent, /部分完成/);
+  assert.match(result.textContent, /学习记录未能确认清空/);
+  assert.equal(toolStatus.className.includes("error"), true);
+  assert.equal(button.disabled, false);
 });

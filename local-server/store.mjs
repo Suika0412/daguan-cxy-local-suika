@@ -57,6 +57,9 @@ export function createStore(rootDir, dataDirOverride = process.env.DAGUAN_DATA_D
       stateWriteQueue = new Promise((resolve) => { release = resolve; });
       await previous;
       try {
+        if (options.resetProgress !== undefined && typeof options.resetProgress !== "boolean") {
+          throw new Error("写入选项 resetProgress 只接受布尔值");
+        }
         const current = await this.readState();
         const expected = options.expectedRevision == null ? null : Number(options.expectedRevision);
         if (expected != null && current.revision !== expected) {
@@ -67,6 +70,9 @@ export function createStore(rootDir, dataDirOverride = process.env.DAGUAN_DATA_D
           throw error;
         }
         const next = normalizeLocalState(value);
+        // 写入正文里的 reset_generation 一律忽略：普通写入、导入和迁移沿用当前安装代次；
+        // 只有显式 { resetProgress: true }（正式清除）才允许让它 +1，调用方不能自行指定更高代次。
+        next.reset_generation = options.resetProgress === true ? current.reset_generation + 1 : current.reset_generation;
         if (options.increment !== false) next.revision = current.revision + 1;
         next.updated_at = new Date().toISOString();
         await writeJson(stateFile, next);

@@ -190,7 +190,157 @@
     hasAny: pendingHasAny,
   };
 
-  const api = { selectionKey, appearanceKeys, appearanceInitKey, migrate, selected, targetUrl, draftKey };
+  // ---- 清除代次（服务端拥有 reset_generation；这里只做共享握手与本地清场） ----
+  // 键名取自真实实现：恢复标记见 web/new-state.js；学习事件/恢复队列/备份缓存/会话见
+  // web/study-activity-client.js；进度、收藏、批注、选题、学习位置与两版脚本共用。
+  const progressResetKey = "daguan_progress_reset_generation_v1";
+  const progressResetEvent = "daguan:progress-reset";
+  const progressKey = "daguan_local_progress_v1";
+  const favoritesKey = "daguan_local_favorites_v1";
+  const positionKey = "daguan_learning_position_v2";
+  const studyEventPrefix = "daguan_study_event_v1:";
+  const studyRestorePrefix = "daguan_study_restore_v1:";
+  const studyCacheKey = "daguan_study_backup_cache_v1";
+  const studySessionsKey = "daguan_study_sessions_v1";
+  const restorePendingKey = "daguan_restore_pending_v1";
+  const restoreRollbackKey = "daguan_restore_rollback_v1";
+  // 混合待同步队列里属于“旧练习”的字段要剥离，收藏意图与其时间戳必须留下。
+  const favoritePatchFields = ["favorite", "is_favorite", "favorite_updated_at", "is_favorite_updated_at"];
+  let confirmedGeneration = null;
+
+  function resetFail(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+  function progressStorage() {
+    const store = storageOf(null);
+    if (!store) throw resetFail("PROGRESS_RESET_STORAGE_UNAVAILABLE", "本地存储不可用，无法确认清除代次");
+    return store;
+  }
+  function validGeneration(value) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+    const number = Number(value);
+    return Number.isInteger(number) && number >= 0 ? number : null;
+  }
+  function generationOf(state) {
+    if (!state || typeof state !== "object" || !Object.prototype.hasOwnProperty.call(state, "reset_generation") || state.reset_generation === undefined) return 0;
+    const value = validGeneration(state.reset_generation);
+    if (value === null) throw resetFail("PROGRESS_GENERATION_INVALID", "服务端清除代次无效，已停止处理");
+    return value;
+  }
+  function stored() {
+    const raw = progressStorage().getItem(progressResetKey);
+    if (raw === null) return 0;
+    const value = validGeneration(raw);
+    if (value === null) throw resetFail("PROGRESS_RESET_STORAGE_CORRUPT", "本地清除代次戳损坏");
+    return value;
+  }
+  function currentGeneration() { return confirmedGeneration; }
+  function capture() {
+    if (confirmedGeneration === null) throw resetFail("PROGRESS_GENERATION_UNKNOWN", "尚未确认清除代次，不能绑定学习请求");
+    return confirmedGeneration;
+  }
+  function isCurrent(generation) {
+    const value = validGeneration(generation);
+    if (value === null || confirmedGeneration === null || value !== confirmedGeneration) return false;
+    return stored() === value;
+  }
+  function removeStoredKey(store, key) {
+    if (typeof store.removeItem !== "function") throw resetFail("PROGRESS_RESET_STORAGE_UNAVAILABLE", `本地存储不支持删除：${key}`);
+    store.removeItem(key);
+  }
+  function keysWithPrefix(store, prefix) {
+    const keys = [];
+    const total = Number(store.length) || 0;
+    for (let index = 0; index < total; index += 1) {
+      const key = typeof store.key === "function" ? store.key(index) : null;
+      if (typeof key === "string" && key.startsWith(prefix)) keys.push(key);
+    }
+    return keys;
+  }
+  function storedProgress(store) {
+    const raw = store.getItem(progressKey);
+    if (raw === null) return null;
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch { throw resetFail("PROGRESS_RESET_STORAGE_CORRUPT", "本地进度存储内容损坏，已停止清除以免丢失收藏"); }
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  }
+  function stripPendingPractice(store) {
+    const journal = readPending(store);
+    const ids = Object.keys(journal.questions);
+    if (!ids.length) return;
+    for (const id of ids) {
+      const patch = {};
+      for (const field of favoritePatchFields) {
+        if (Object.prototype.hasOwnProperty.call(journal.questions[id].patch, field)) patch[field] = journal.questions[id].patch[field];
+      }
+      if (Object.keys(patch).length) journal.questions[id] = { ...journal.questions[id], patch };
+      else delete journal.questions[id];
+    }
+    if (!Object.keys(journal.questions).length && !Object.keys(journal.annotations).length) {
+      removeStoredKey(store, pendingKey);
+      return;
+    }
+    store.setItem(pendingKey, JSON.stringify({ version: 1, annotations: journal.annotations, questions: journal.questions }));
+  }
+  function clearSessionPractice() {
+    const session = root.sessionStorage;
+    if (!session || typeof session.getItem !== "function") return;
+    removeStoredKey(session, positionKey);
+    removeStoredKey(session, studySessionsKey);
+  }
+  // 只清“旧练习”相关数据：收藏、批注、选题、备忘、AI、浏览历史与官网元数据都不在这里。
+  function clearPracticeStorage(store, remoteState) {
+    const previous = storedProgress(store);
+    // 旧包裹形态把 favorites 放在 progress 里；先提取到独立收藏键，避免随后覆盖 progress 时丢掉收藏。
+    if (store.getItem(favoritesKey) === null && previous && Array.isArray(previous.favorites)) {
+      store.setItem(favoritesKey, JSON.stringify(previous.favorites.map(String)));
+    }
+    const remote = remoteState && remoteState.progress && typeof remoteState.progress === "object" && !Array.isArray(remoteState.progress) ? remoteState.progress : {};
+    store.setItem(progressKey, JSON.stringify(remote));
+    removeStoredKey(store, positionKey);
+    clearSessionPractice();
+    for (const key of keysWithPrefix(store, studyEventPrefix)) removeStoredKey(store, key);
+    for (const key of keysWithPrefix(store, studyRestorePrefix)) removeStoredKey(store, key);
+    removeStoredKey(store, studyCacheKey);
+    removeStoredKey(store, restorePendingKey);
+    removeStoredKey(store, restoreRollbackKey);
+    stripPendingPractice(store);
+  }
+  function notifyProgressReset(detail) {
+    root.dispatchEvent(new root.CustomEvent(progressResetEvent, { detail }));
+  }
+  // 事件派发能力必须在任何写操作之前确认：否则提交代次戳后才失败，下次会误判“已清”。
+  function requireProgressResetEvent() {
+    if (typeof root.dispatchEvent !== "function" || typeof root.CustomEvent !== "function") throw resetFail("PROGRESS_RESET_EVENT_UNAVAILABLE", "运行环境无法派发清除代次事件，已停止清除");
+  }
+  // 远端代次是权威值：不能倒退；持久戳落后才真正清storage，且代次戳最后提交。
+  function adopt(remoteState) {
+    const store = progressStorage();
+    const generation = generationOf(remoteState);
+    const persisted = stored();
+    const known = confirmedGeneration;
+    if (known !== null && generation < known) throw resetFail("STALE_PROGRESS_SNAPSHOT", `清除代次不能倒退（远端 ${generation}，已确认 ${known}）`);
+    if (generation < persisted) throw resetFail("STALE_PROGRESS_SNAPSHOT", `清除代次不能倒退（远端 ${generation}，持久代次 ${persisted}）`);
+    const baseline = known === null ? 0 : known;
+    const changed = generation !== baseline;
+    const storageChanged = generation !== persisted;
+    if (changed || storageChanged) requireProgressResetEvent();
+    if (storageChanged) {
+      clearPracticeStorage(store, remoteState);
+      store.setItem(progressResetKey, String(generation));
+    } else if (changed) {
+      // 别的窗口已把共享 localStorage 推进到新代次：只清本页 session 里的旧学习位置/会话。
+      clearSessionPractice();
+    }
+    confirmedGeneration = generation;
+    if (changed || storageChanged) notifyProgressReset({ generation, changed });
+    return { generation, changed, storageChanged };
+  }
+  const progressReset = { generationOf, current: currentGeneration, stored, capture, isCurrent, adopt };
+
+  const api = { selectionKey, appearanceKeys, appearanceInitKey, migrate, selected, targetUrl, draftKey, progressReset };
   root.DaguanVersions = api;
   if (!root.document) return;
   const current = root.location.pathname.endsWith("/legacy.html") ? "old" : "new";

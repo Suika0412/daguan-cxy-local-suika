@@ -153,22 +153,48 @@ export function createStudyActivity(dataDir, readState) {
     await fs.rename(temp, file);
   }
   const baselineOf = p => ({ failed: p.last_ok === false || p.error_prone === true });
-  async function read() {
+  // 清除代次由 state 拥有。旧战报与旧调用方缺该字段按 0 兼容；出现非法值显式失败，不做静默回落。
+  const generationOf = (value, label) => {
+    if (value === undefined || value === null) return 0;
+    if (!Number.isInteger(value) || value < 0) throw Object.assign(new Error(`${label}清除代次无效`), { code: 'ACTIVITY_GENERATION_INVALID' });
+    return value;
+  };
+  // 只读 state（readState 不写入、不取 store 写队列），活动队列因此不会反向获取服务端 withLock。
+  async function readAligned() {
+    const state = await readState();
+    const generation = generationOf(state?.reset_generation, '本地状态');
+    let data;
     try {
-      const data = JSON.parse(await fs.readFile(file, 'utf8'));
+      data = JSON.parse(await fs.readFile(file, 'utf8'));
       if (data.version !== 1 || !data.events || !data.baseline || !Number.isFinite(Date.parse(data.started_at))) throw new Error('学习战报文件损坏，请从备份恢复');
-      return data;
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
-      const state = await readState();
-      const data = { version: 1, started_at: new Date().toISOString(), baseline: {}, events: {} };
-      for (const [id, p] of Object.entries(state.progress || {})) if (learned(p)) data.baseline[id] = baselineOf(p);
-      await save(data); return data;
+      const created = { version: 1, started_at: new Date().toISOString(), baseline: {}, events: {}, reset_generation: generation };
+      for (const [id, p] of Object.entries(state.progress || {})) if (learned(p)) created.baseline[id] = baselineOf(p);
+      await save(created);
+      return { data: created, cleared: false, generation };
     }
+    const stored = generationOf(data.reset_generation, '学习战报');
+    // 战报代次超前于 state 说明当前安装并未清除：显式失败，不落盘、不覆盖更晚的数据。
+    if (stored > generation) throw Object.assign(new Error(`学习战报代次 ${stored} 超前于本地状态代次 ${generation}，拒绝清理更晚的记录`), { code: 'ACTIVITY_GENERATION_AHEAD' });
+    if (stored === generation) return { data, cleared: false, generation };
+    // 落后：在活动队列内真正落盘清空 events 与 baseline，保留 started_at，save 让 revision 单调递增。
+    data.events = {};
+    data.baseline = {};
+    data.reset_generation = generation;
+    await save(data); // 写失败向上抛出：磁盘仍是旧代次，下一次访问按同一代次重试
+    return { data, cleared: true, generation };
   }
+  const read = async () => (await readAligned()).data;
   return {
     ensure: () => locked(read),
     export: () => locked(read),
+    // T5b 正式清除的活动侧原语：对齐到调用时 state 的当前代次（清空 events/baseline，保留 started_at）。
+    // cleared 表示本次调用是否真的清空过：读时已自愈则返回 false，且不会再产生一次无意义写入。
+    clear: () => locked(async () => {
+      const { cleared, data, generation } = await readAligned();
+      return { cleared, reset_generation: generation, revision: data.revision || 0, started_at: data.started_at };
+    }),
     summary: options => locked(async () => summarizeStudy(await read(), options)),
     journal: options => locked(async () => summarizeJournal(await read(), options)),
     append: input => locked(async () => {

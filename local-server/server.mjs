@@ -223,13 +223,48 @@ async function withLock(task) {
   try { return await task(); } finally { release(); }
 }
 
-async function writeState(value, options) {
-  const saved = await store.writeState(value, options);
-  if (options?.studyImport) await studyActivity.observeImport(saved);
+// revision 只接受真正的非负整数：null、空串、布尔等不得被 Number() 折成 0 而误判为合法版本。
+function readRevision(value) {
+  if (typeof value === "number") return Number.isInteger(value) && value >= 0 ? value : null;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+function requestRevision(req, incoming) {
+  return readRevision(req.headers["if-match"] != null ? req.headers["if-match"] : incoming?.revision);
+}
+
+// 学习数据写入的清除代次守卫：必须在真正写入的同一个 withLock 内调用，禁止锁外校验后写入。
+// 缺字段的兼容仅限当前安装代次为 0；strict 用于正式清除，要求显式给出与当前一致的代次。
+function progressResetRequired(current) {
+  const error = new Error("本机的做题记录已被清除，本页进度已过期。请刷新页面（或切回最新版界面）后再继续学习。");
+  error.code = "PROGRESS_RESET_REQUIRED";
+  error.status = 428;
+  error.current = current;
+  return error;
+}
+
+function requireProgressGeneration(incoming, current, strict = false) {
+  const raw = incoming?.reset_generation;
+  const missing = raw === undefined || raw === null;
+  if (missing && strict) throw progressResetRequired(current);
+  const incomingGeneration = missing ? 0 : raw;
+  if (!Number.isInteger(incomingGeneration) || incomingGeneration < 0 || incomingGeneration !== current.reset_generation) {
+    throw progressResetRequired(current);
+  }
+}
+
+function broadcastState(saved) {
   const event = `event: state\ndata: ${JSON.stringify({ revision: saved.revision, updated_at: saved.updated_at })}\n\n`;
   for (const response of stateEventClients) {
     try { response.write(event); } catch { stateEventClients.delete(response); }
   }
+}
+
+async function writeState(value, options) {
+  const saved = await store.writeState(value, options);
+  if (options?.studyImport) await studyActivity.observeImport(saved);
+  broadcastState(saved);
   return saved;
 }
 
@@ -506,12 +541,24 @@ async function route(req, res) {
   if (pathname === "/api/study-activity/journal" && method === "GET") return json(res, 200, await studyActivity.journal({ end: url.searchParams.get('end') || undefined, timeZone: url.searchParams.get('timeZone') || 'Asia/Hong_Kong' }));
   if (pathname === "/api/study-activity/export" && method === "GET") return json(res, 200, await studyActivity.export());
   if (pathname === "/api/study-activity/events" && method === "POST") {
-    const accepted = await studyActivity.append((await body(req)).events);
-    broadcastStudyActivity(); return json(res, 200, { ok: true, accepted });
+    // 正文只读一次；事件提交体为 { events, reset_generation }，活动写入与清除在同一把 withLock 内串行。
+    const incoming = await body(req);
+    return withLock(async () => {
+      const current = await store.readState();
+      requireProgressGeneration(incoming, current);
+      const accepted = await studyActivity.append(incoming.events);
+      broadcastStudyActivity(); return json(res, 200, { ok: true, accepted });
+    });
   }
   if (pathname === "/api/study-activity/merge" && method === "POST") {
-    const result = await studyActivity.merge(await body(req));
-    broadcastStudyActivity(); return json(res, 200, { ok: true, ...result });
+    // 合并体仍是备份文档：正文里的 reset_generation 只当请求当前代次校验，不作为导入代次使用。
+    const incoming = await body(req);
+    return withLock(async () => {
+      const current = await store.readState();
+      requireProgressGeneration(incoming, current);
+      const result = await studyActivity.merge(incoming);
+      broadcastStudyActivity(); return json(res, 200, { ok: true, ...result });
+    });
   }
   if (pathname === "/api/visit-history" && method === "GET") return json(res, 200, { ok: true, entries: await visitHistory.list() });
   if (pathname === "/api/visit-history" && method === "POST") { const entry = await visitHistory.visit(await body(req)); broadcastHistory(); return json(res, 200, { ok: true, entry }); }
@@ -535,19 +582,56 @@ async function route(req, res) {
   if (pathname === "/api/state" && method === "GET") return json(res, 200, await store.readState());
   if (pathname === "/api/state" && method === "PUT") {
     const incoming = await body(req);
-    const expectedRevision = req.headers["if-match"] != null ? Number(req.headers["if-match"]) : Number(incoming.revision);
-    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "整份状态写入必须携带 revision；请改用逐题接口" });
-    const saved = await withLock(() => writeState(localStateShape(incoming), { expectedRevision, studyImport: true }));
+    const expectedRevision = requestRevision(req, incoming);
+    if (expectedRevision == null) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "整份状态写入必须携带 revision；请改用逐题接口" });
+    const saved = await withLock(async () => {
+      const current = await store.readState();
+      requireProgressGeneration(incoming, current);
+      return writeState(localStateShape(incoming), { expectedRevision, studyImport: true });
+    });
     return json(res, 200, { ok: true, state: saved, revision: saved.revision });
+  }
+  if (pathname === "/api/state/clear-progress" && method === "POST") {
+    const incoming = await body(req);
+    const expectedRevision = requestRevision(req, incoming);
+    if (expectedRevision == null) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "清除做题记录必须携带 revision" });
+    return withLock(async () => {
+      const current = await store.readState();
+      if (current.revision !== expectedRevision) {
+        const error = new Error("本地状态版本已变化，请重新确认后再清除");
+        error.code = "STATE_CONFLICT";
+        error.status = 409;
+        error.current = current;
+        throw error;
+      }
+      requireProgressGeneration(incoming, current, true);
+      // 预检：活动文件损坏或代次超前必须在 state 落盘前失败，避免把 state 推进到无法对齐的代次。
+      await studyActivity.ensure();
+      const saved = await store.writeState({ ...current, progress: {}, last_study: null }, { expectedRevision, resetProgress: true });
+      try {
+        await studyActivity.clear();
+      } catch (cause) {
+        const error = new Error(`做题记录与最近学习位置已清除（版本 ${saved.revision}、清除代次 ${saved.reset_generation}），但学习手账与战报清理未完成：${cause?.message || cause}。请稍后重新打开页面，服务会在下次访问时按同一代次重试清理。`);
+        error.code = "ACTIVITY_RESET_FAILED";
+        error.status = 500;
+        error.current = saved;
+        error.cause = cause;
+        throw error;
+      }
+      broadcastState(saved);
+      broadcastStudyActivity();
+      return json(res, 200, { ok: true, state: saved, revision: saved.revision, reset_generation: saved.reset_generation });
+    });
   }
   if (pathname.startsWith("/api/state/questions/") && !pathname.endsWith("/annotation") && method === "PATCH") {
     const questionId = pathname.slice("/api/state/questions/".length);
     if (!/^\d+$/.test(questionId)) return json(res, 400, { ok: false, error: "题目 ID 无效" });
     const incoming = await body(req);
-    const expectedRevision = req.headers["if-match"] != null ? Number(req.headers["if-match"]) : incoming.revision;
-    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "逐题状态写入必须携带 revision" });
+    const expectedRevision = requestRevision(req, incoming);
+    if (expectedRevision == null) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "逐题状态写入必须携带 revision" });
     const saved = await withLock(async () => {
       const current = await store.readState();
+      requireProgressGeneration(incoming, current);
       if (expectedRevision != null && current.revision !== expectedRevision) {
         const error = new Error("本地状态版本已变化，请重新合并");
         error.code = "STATE_CONFLICT";
@@ -573,8 +657,11 @@ async function route(req, res) {
       if (incoming.favorite != null || incoming.is_favorite != null) { entry.favorite = incoming.favorite ?? incoming.is_favorite === true; entry.favorite_updated_at = at; }
       entry.updated_at = at;
       progress[questionId] = entry;
+      // 收藏意图以 current.favorites 为准：清除只清练习记录时该题的进度条目为空，
+      // 逐题写练习字段（payload 不带 favorite）不能顺带删掉原有收藏；显式 favorite:false 仍取消收藏。
       const favorites = new Set(current.favorites || []);
-      if (entry.favorite) favorites.add(questionId); else favorites.delete(questionId);
+      if (entry.favorite) favorites.add(questionId);
+      else if (incoming.favorite != null || incoming.is_favorite != null) favorites.delete(questionId);
       return writeState({ ...current, progress, favorites: [...favorites].sort((a, b) => Number(a) - Number(b)) }, { expectedRevision: current.revision, studyAction: true });
     });
     return json(res, 200, { ok: true, revision: saved.revision, state: saved });
@@ -583,8 +670,8 @@ async function route(req, res) {
     const questionId = pathname.slice("/api/state/questions/".length, -"/annotation".length);
     if (!/^\d+$/.test(questionId)) return json(res, 400, { ok: false, error: "题目 ID 无效" });
     const incoming = await body(req);
-    const expectedRevision = req.headers["if-match"] != null ? Number(req.headers["if-match"]) : Number(incoming.revision);
-    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "批注写入必须携带 revision" });
+    const expectedRevision = requestRevision(req, incoming);
+    if (expectedRevision == null) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "批注写入必须携带 revision" });
     const saved = await withLock(async () => {
       const current = await store.readState();
       if (current.revision !== expectedRevision) {
@@ -603,10 +690,11 @@ async function route(req, res) {
   }
   if (pathname === "/api/state/last-study" && method === "PATCH") {
     const incoming = await body(req);
-    const expectedRevision = req.headers["if-match"] != null ? Number(req.headers["if-match"]) : incoming.revision;
-    if (!Number.isInteger(Number(expectedRevision)) || Number(expectedRevision) < 0) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "最近学习位置写入必须携带 revision" });
+    const expectedRevision = requestRevision(req, incoming);
+    if (expectedRevision == null) return json(res, 409, { ok: false, code: "REVISION_REQUIRED", error: "最近学习位置写入必须携带 revision" });
     const saved = await withLock(async () => {
       const current = await store.readState();
+      requireProgressGeneration(incoming, current);
       if (expectedRevision != null && current.revision !== expectedRevision) {
         const error = new Error("本地状态版本已变化，请重新合并");
         error.code = "STATE_CONFLICT";
@@ -622,6 +710,7 @@ async function route(req, res) {
     const incoming = await body(req);
     const saved = await withLock(async () => {
       const current = await store.readState();
+      requireProgressGeneration(incoming, current);
       const merged = mergeMigratedState(current, incoming);
       return writeState(merged, { expectedRevision: current.revision, studyImport: true });
     });

@@ -31,6 +31,11 @@ function readUpdatedAt(value) {
   return state.updated_at || state.updatedAt || null;
 }
 
+// 清除代次由服务端拥有：旧文档没有该字段时取 0，只保留非负整数，其余一律回落 0。
+function readResetGeneration(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
 function localMasteryToRemote(value) {
   if (value === "mastered") return "mastered";
   if (value === "forgot") return "not_known";
@@ -89,6 +94,7 @@ export function normalizeLocalState(value) {
     format: "daguan-local-state",
     version: 3,
     revision: Math.max(0, Math.floor(Number(source.revision) || 0)),
+    reset_generation: readResetGeneration(source.reset_generation),
     progress: normalizedProgress,
     annotations: source.annotations && typeof source.annotations === "object" && !Array.isArray(source.annotations) ? { ...source.annotations } : {},
     favorites,
@@ -128,6 +134,8 @@ export function mergeMigratedState(currentValue, incomingValue) {
   };
   return {
     ...current,
+    // 迁移只导入学习记录；清除代次属于当前安装，导入文档不能改变它。
+    reset_generation: current.reset_generation,
     progress: mergeMap(current.progress, incoming.progress),
     annotations: mergeMap(current.annotations, incoming.annotations),
     favorites: [...new Set([...current.favorites, ...incoming.favorites])],
