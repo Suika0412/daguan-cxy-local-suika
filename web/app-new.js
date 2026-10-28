@@ -5,7 +5,7 @@
 
 // ========== 离线缓存注册（与 app2.js 一致） ==========
 if ("serviceWorker" in navigator && location.protocol !== "file:" && location.protocol !== "https:") {
-    navigator.serviceWorker.register("./service-worker.js?v=171").catch(() => {});
+    navigator.serviceWorker.register("./service-worker.js?v=172").catch(() => {});
 }
 
 // ========== 全局状态 ==========
@@ -448,6 +448,60 @@ class UIRenderer {
         const ids = this.scopeQuestionIdsCache.get(AppState.chapterScope);
         return entries.reduce((count, entry) => count + Number(ids.has(String(entry.id))), 0);
     }
+
+    // 题单节点：题库同步会写 collection_id；已存在的历史题单没有该字段，只能靠 manifest
+    // 的题单摘要按名字识别。这种回退必须同时落在本次题单的 7000000 段内（不含 8000000 起的
+    // 其他区间），否则本机 980M 段合成普通分类恰好与题单同名时会被误认成题单。
+    static isCollectionNode(node) {
+        if (!node) return false;
+        if (node.collection_id) return true;
+        const collections = AppState.manifest?.collections || [];
+        const id = Number(node.id);
+        return collections.length > 0
+            && id >= 7000000 && id < 8000000
+            && collections.some(collection => String(collection.name) === String(node.name));
+    }
+
+    // 主目录与章节选择弹窗共用这套可见性规则：完整范围保持原目录；严选/真题只在
+    // 当前范围题数大于 0 时显示子节点（depth 0 的科目根始终可进入），并在题单已经
+    // 覆盖同一批题目时去掉重复的原章节入口；没有题单时等同于普通目录过滤。
+    static visibleCatalogNodes(nodes, depth = 0) {
+        const list = nodes || [];
+        if (AppState.chapterScope === 'all') return list;
+        const ids = this.scopeQuestionIdsCache.get(AppState.chapterScope);
+        if (!ids) return list;
+        if (depth === 0) return list;
+        const scoped = node => (node?.questions || []).filter(entry => ids.has(String(entry.id)));
+        const visible = list.filter(node => this.scopeCountForNode(node) > 0);
+        const covered = new Set();
+        for (const collection of visible.filter(node => this.isCollectionNode(node))) {
+            for (const entry of scoped(collection)) covered.add(String(entry.id));
+        }
+        if (!covered.size) return visible;
+        return visible.filter(node => {
+            if (this.isCollectionNode(node)) return true;
+            const entries = scoped(node);
+            // 只隐藏被题单完整覆盖的节点；仍有题单外题目的原章节继续显示。
+            return !entries.length || !entries.every(entry => covered.has(String(entry.id)));
+        });
+    }
+
+    // 选中节点在当前范围被隐藏时退到最近可见祖先，避免目录与内容停在进不去的路径上。
+    // 逐层从科目根校验整条路径：父级被题单覆盖隐藏、而子级自身有题时同样要退到可见祖先，
+    // 不能只看子级兄弟就停在不可达的深层；节点已不在目录树里时回到科目根，不返回游离节点。
+    static visibleDirectoryNode(category, node) {
+        if (!node || !category) return node;
+        const path = this.pathToNode(category, node.id);
+        if (!path) return category;
+        if (AppState.chapterScope === 'all' || !this.scopeQuestionIdsCache.has(AppState.chapterScope)) return node;
+        let visible = path[0];
+        for (let depth = 1; depth < path.length; depth += 1) {
+            const siblings = this.visibleCatalogNodes(path[depth - 1].children || [], depth);
+            if (!siblings.some(item => String(item.id) === String(path[depth].id))) break;
+            visible = path[depth];
+        }
+        return visible;
+    }
     static lastPositionTrail() {
         const position = StorageService.getLearningPosition();
         const category = position && this.findCategoryById(position.categoryId);
@@ -771,26 +825,28 @@ class UIRenderer {
     // 因此同名章节也能各自保持选中态和恢复位置。
     static catalogColumns(category, activeNode = null) {
         const roots = AppState.categories?.categories || [];
+        // 选中节点先按共享可见性回退到可见祖先，再构造路径：主目录不为已隐藏的节点保留列，
+        // 与 chapter picker 的截断行为保持同源。
+        activeNode = this.visibleDirectoryNode(category, activeNode);
         const activePath = activeNode ? (this.pathToNode(category, activeNode.id) || [category]) : [category];
         const columns = [];
         let nodes = roots;
         let parent = null;
         for (let depth = 0; ; depth += 1) {
             const selected = activePath[depth] || null;
-            // 严选范围下隐藏题数为 0 的目录项，避免点进去必然为空；当前路径上的节点必须保留。
-            const hideEmptyItems = AppState.chapterScope === 'core';
+            const visibleNodes = this.visibleCatalogNodes(nodes, depth);
             columns.push({
                 depth,
                 parent,
-                nodes,
+                nodes: visibleNodes,
                 selectedId: selected ? String(selected.id) : null,
-                items: nodes.map(node => ({
+                items: visibleNodes.map(node => ({
                     node,
                     selected: !!selected && String(node.id) === String(selected.id),
                     hasChildren: !!(node.children || []).length,
                     questionCount: this.scopeCountForNode(node),
                     directCount: this.scopeCountForNode(node, true),
-                })).filter(item => !hideEmptyItems || item.selected || item.questionCount > 0),
+                })),
                 directNode: parent && (parent.children || []).length && (parent.direct_questions || parent.questions || []).length ? parent : null,
             });
             if (!selected || !(selected.children || []).length) break;
@@ -831,6 +887,12 @@ class UIRenderer {
         const contentEl = document.getElementById('library-content');
         if (!contentEl) return;
         const category = AppState.currentCategory;
+        // 当前范围把选中的目录节点隐藏时，内容与面包屑退到最近可见祖先，不再停在进不去的路径上。
+        const visibleNode = this.visibleDirectoryNode(category, node);
+        if (visibleNode && String(visibleNode.id) !== String(node.id)) {
+            node = visibleNode;
+            AppState.directoryNodeId = String(node.id);
+        }
         const path = this.pathToNode(category, node.id) || [category, node];
         AppState.directoryPathIds = path.map(part => String(part.id));
         const crumbs = path.map((part, index) => `<button type="button" class="breadcrumb-part" data-node-id="${escapeHtml(String(part.id))}" aria-current="${index === path.length - 1 ? 'page' : 'false'}">${escapeHtml(part.name || part.title || '')}</button>`);
@@ -934,31 +996,36 @@ class UIRenderer {
         const host = document.getElementById('chapter-picker');
         if (!host) return;
         const roots = AppState.categories?.categories || [];
+        // 保存的弹窗路径同样按共享可见性重建：被当前范围隐藏或已不存在的层级截断到最近可见节点，
+        // 弹窗的列和面包屑都不会停在进不去的路径上。
+        const savedIds = AppState.chapterPickerPath || [];
+        const pathNodes = [];
+        let cursor = roots;
+        for (let depth = 0; depth < savedIds.length; depth += 1) {
+            const node = this.visibleCatalogNodes(cursor, depth).find(item => String(item.id) === String(savedIds[depth]));
+            if (!node) break;
+            pathNodes.push(node);
+            cursor = node.children || [];
+        }
+        if (pathNodes.length !== savedIds.length) AppState.chapterPickerPath = pathNodes.map(node => String(node.id));
+        const selectedIds = AppState.chapterPickerPath || [];
         let nodes = roots;
         let path = [];
-        const selectedIds = AppState.chapterPickerPath || [];
         const columns = [];
         for (let depth = 0; depth <= selectedIds.length; depth += 1) {
             const selectedId = selectedIds[depth];
-            columns.push(`<div class="chapter-picker-column" role="listbox" aria-label="${depth ? escapeHtml(path.at(-1)?.name || '章节') + '下级' : '科目'}">${nodes.map(node => {
+            const visibleNodes = this.visibleCatalogNodes(nodes, depth);
+            columns.push(`<div class="chapter-picker-column" role="listbox" aria-label="${depth ? escapeHtml(path.at(-1)?.name || '章节') + '下级' : '科目'}">${visibleNodes.map(node => {
                 const selected = String(node.id) === String(selectedId);
                 const children = node.children || [];
                 const hasBranch = children.length > 0;
                 const count = this.scopeCountForNode(node);
                 return `<button type="button" class="chapter-picker-item${selected ? ' active' : ''}${hasBranch ? ' has-children' : ''}" role="option" aria-selected="${selected}" aria-expanded="${hasBranch ? selected : 'false'}" data-picker-id="${escapeHtml(String(node.id))}" data-picker-depth="${depth}"><span>${escapeHtml(node.name || node.title || '')}</span><small>${count} 题</small>${hasBranch ? '<span aria-hidden="true">›</span>' : ''}</button>`;
             }).join('')}${path.at(-1) && this.scopeCountForNode(path.at(-1), true) ? `<button type="button" class="chapter-picker-item direct-picker-item" data-picker-direct="${escapeHtml(String(path.at(-1).id))}" data-picker-depth="${depth}"><span>本级直属题</span><small>${this.scopeCountForNode(path.at(-1), true)} 题</small></button>` : ''}</div>`);
-            const selectedNode = nodes.find(node => String(node.id) === String(selectedId));
+            const selectedNode = visibleNodes.find(node => String(node.id) === String(selectedId));
             if (!selectedNode || !selectedNode.children?.length) break;
             path.push(selectedNode);
             nodes = selectedNode.children;
-        }
-        const pathNodes = [];
-        let cursor = roots;
-        for (const id of selectedIds) {
-            const node = cursor.find(item => String(item.id) === String(id));
-            if (!node) break;
-            pathNodes.push(node);
-            cursor = node.children || [];
         }
         const backDisabled = selectedIds.length ? '' : 'disabled aria-disabled="true"';
         host.innerHTML = `<div class="chapter-picker-backdrop" data-picker-close></div><section class="chapter-picker-dialog" role="dialog" aria-modal="true" aria-label="选择小节"><header><div><p>章节导航</p><h2>${escapeHtml(pathNodes.at(-1)?.name || '选择小节')}</h2></div><button type="button" class="btn btn-text" data-picker-close aria-label="关闭章节导航">关闭</button></header><div class="chapter-picker-controls">${this.scopeButtons()}</div><nav class="chapter-picker-path" aria-label="当前目录路径"><button type="button" data-picker-path="0">科目</button>${pathNodes.map((node, index) => `<span aria-hidden="true">›</span><button type="button" data-picker-path="${index + 1}" aria-current="${index === pathNodes.length - 1 ? 'page' : 'false'}">${escapeHtml(node.name || node.title || '')}</button>`).join('')}</nav><div class="chapter-picker-columns">${columns.join('')}</div><footer><button type="button" class="btn btn-secondary" data-picker-back ${backDisabled}>上一级</button><p class="chapter-picker-feedback" role="status" aria-live="polite">目录题数按当前范围统计；详细筛选进入章节后生效。</p></footer></section>`;

@@ -34,10 +34,28 @@ function jsonResponse(value) {
   return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
+// 空题单：三个 collection 端点都返回合法但为空的 data，供不关心题单的既有用例复用。
+const EMPTY_COLLECTION_METADATA = {
+  code: 0, data: { id: "linear-algebra-selected-20261018", name: "线代严选题", revision: 1,
+    item_count: 0, is_official: true, status: "published", definition_kind: "explicit" },
+};
+const EMPTY_COLLECTION_DIRECTORY = { code: 0, data: { total: 0, roots: [{ id: "1", label: "线性代数",
+  category_id: 1, question_count: 0, children: [] }] } };
+const EMPTY_COLLECTION_ITEMS = { code: 0, data: { items: [], total: 0, page: 1, per_page: 200 } };
+
+function collectionResponse(pathname) {
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018") return EMPTY_COLLECTION_METADATA;
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018/directory") return EMPTY_COLLECTION_DIRECTORY;
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018/items") return EMPTY_COLLECTION_ITEMS;
+  return null;
+}
+
 function stubOfficialFetch(questions = OFFICIAL_QUESTIONS, categories = CATEGORIES) {
   const original = globalThis.fetch;
   globalThis.fetch = async url => {
     const target = new URL(url);
+    const collection = collectionResponse(target.pathname);
+    if (collection) return jsonResponse(collection);
     if (target.pathname === "/api/categories") return jsonResponse(categories);
     const page = Number(target.searchParams.get("page") || 1);
     const perPage = Number(target.searchParams.get("per_page") || 200);

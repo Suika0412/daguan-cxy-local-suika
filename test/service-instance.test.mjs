@@ -405,7 +405,7 @@ test("concurrent launchers serialize recovery of one stale owner without deletin
       if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
       currentOwner = null;
     }
-    if (launcherPids.has(currentOwner.pid)) break;
+    if (currentOwner && launcherPids.has(currentOwner.pid)) break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.ok(currentOwner && launcherPids.has(currentOwner.pid), "one new launcher must atomically claim the stale lease");

@@ -34,6 +34,7 @@ class FakeElement {
   addEventListener(name, handler) { this.handlers[name] = handler; }
   appendChild(child) { this.children.push(child); return child; }
   querySelectorAll() { return []; }
+  querySelector() { return null; }
   click() { this.handlers.click?.({ target: this }); }
 }
 
@@ -416,8 +417,8 @@ test("叶子分类直属题非空时仍只返回直属题", async () => {
   assert.equal(ui.DataService.chapterEntries(chapter).length, 2);
 });
 
-// 严选范围只隐藏点进去必然为空的目录项；完整/真题范围与当前路径上的选中节点保持原样。
-test("严选范围隐藏零题目录项，完整与真题范围保持显示，当前选中空节点保留", async () => {
+// 非完整范围只隐藏点进去必然为空的目录项，科目根除外；被隐藏的选中节点退到可见祖先。
+test("严选与真题范围隐藏零题目录项，完整范围保持显示，当前选中空节点回退祖先", async () => {
   const ui = loadNewUI();
   const state = ui.AppState;
   state.manifest = { shards: { high: { file: "shards/high.json" } } };
@@ -464,17 +465,178 @@ test("严选范围隐藏零题目录项，完整与真题范围保持显示，�
   assert.equal(ui.UIRenderer.scopeCountForNode(coreNode), 0);
   assert.deepEqual(
     Array.from(ui.UIRenderer.catalogColumns(subject, subject)[1].items, item => item.node.id),
-    ["core-node", "real-node", "empty"],
-    "真题范围不启用过滤，即使题数为 0 也照常显示",
+    ["real-node"],
+    "真题范围同样隐藏当前范围零题的目录项",
   );
 
   state.chapterScope = "core";
   const selectedEmpty = ui.UIRenderer.catalogColumns(subject, emptyNode);
-  assert.equal(selectedEmpty[1].selectedId, "empty");
+  assert.equal(selectedEmpty[0].selectedId, "subject", "被隐藏的选中节点回退到科目根");
+  assert.equal(selectedEmpty[1].selectedId, null);
   assert.deepEqual(
     Array.from(selectedEmpty[1].items, item => item.node.id),
-    ["core-node", "empty"],
-    "当前路径上的零题节点即便被选中也必须保留，同级零题兄弟仍然隐藏",
+    ["core-node"],
+    "被当前范围隐藏的选中节点不再保留在列里，同级零题兄弟同样隐藏",
   );
-  assert.equal(selectedEmpty[1].items.find(item => item.node.id === "empty").questionCount, 0);
+});
+
+// 官方题单是只读目录投影：完整范围保持原目录；非完整范围隐藏零题子节点（科目根除外），
+// 题单已完整覆盖同一批题目时不再重复挂出原章节入口，只被覆盖一部分的原章节继续保留。
+test("题单覆盖去重、部分覆盖保留、科目根可见且完整范围不变", () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  const renderer = ui.UIRenderer;
+  state.chapterScope = "core";
+  renderer.scopeQuestionIdsCache.set("core", new Set(["1", "2", "3", "9"]));
+  const original = { id: 20, name: "原有章节", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  const partial = { id: 21, name: "部分覆盖", question_count: 2, questions: [{ id: 1 }, { id: 9 }], children: [] };
+  const empty = { id: 22, name: "线性方程组", question_count: 0, questions: [], children: [] };
+  const collection = { id: 7000000, name: "线代严选题", collection_id: "linear-algebra-selected-20261018", question_count: 3, questions: [{ id: 1 }, { id: 2 }, { id: 3 }], children: [] };
+  const linear = { id: 10, name: "线性代数", question_count: 4, questions: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 9 }], children: [original, partial, empty, collection] };
+  const probability = { id: 11, name: "概率统计", question_count: 0, questions: [], children: [] };
+  state.categories = { categories: [linear, probability] };
+
+  assert.deepEqual(
+    Array.from(renderer.visibleCatalogNodes(linear.children, 1), node => node.name),
+    ["部分覆盖", "线代严选题"],
+    "被题单完整覆盖的原章节与零题子节点都不显示",
+  );
+  assert.deepEqual(
+    Array.from(renderer.visibleCatalogNodes([linear, probability], 0), node => node.name),
+    ["线性代数", "概率统计"],
+    "科目根即便当前范围没有题目也保持可见",
+  );
+  assert.equal(renderer.visibleDirectoryNode(linear, original).id, 10, "被隐藏的选中节点退到最近可见祖先");
+  assert.equal(renderer.visibleDirectoryNode(linear, partial), partial, "可见节点保持自身");
+  assert.deepEqual(
+    Array.from(renderer.catalogColumns(linear, linear)[1].items, item => item.node.name),
+    ["部分覆盖", "线代严选题"],
+    "主目录与可见性判断同源",
+  );
+
+  state.chapterScope = "all";
+  assert.deepEqual(
+    Array.from(renderer.visibleCatalogNodes(linear.children, 1), node => node.name),
+    ["原有章节", "部分覆盖", "线性方程组", "线代严选题"],
+    "完整范围保持原目录",
+  );
+});
+
+// 已存在的历史题单没有 collection_id：只有 manifest 确有同名题单摘要时才认，
+// 不能只凭 id 落在 7000000 之后判断，否则本机 980M 段合成普通分类会被误认成题单。
+test("无 collection_id 的历史题单按 manifest 名字识别，大 id 普通分类不误认", () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  const renderer = ui.UIRenderer;
+  state.manifest = { collections: [{ id: "linear-algebra-selected-20261018", name: "线代严选题", question_count: 2, unmatched: 0 }] };
+  assert.equal(renderer.isCollectionNode({ id: 7000000, name: "线代严选题" }), true);
+  assert.equal(renderer.isCollectionNode({ id: 7000000, name: "未被收录的题单" }), false, "manifest 没有同名题单时按普通目录处理");
+  assert.equal(renderer.isCollectionNode({ id: 980923347, name: "数一" }), false, "本机 980M 段合成普通分类不因 id 大被判成题单");
+  assert.equal(renderer.isCollectionNode({ id: 123, name: "普通章节", collection_id: "linear-algebra-selected-20261018" }), true, "同步写入的 collection_id 直接生效");
+
+  // 名字恰好相同也不够：历史题单回退只在本次题单 7000000 段内生效，其他大 id 区间不认。
+  state.manifest = { collections: [{ id: "legacy", name: "数一", question_count: 2, unmatched: 0 }] };
+  assert.equal(renderer.isCollectionNode({ id: 980923347, name: "数一" }), false, "980M 段同名普通分类不误认成题单");
+  assert.equal(renderer.isCollectionNode({ id: 7000000, name: "数一" }), true, "7000000 段内同名才按历史题单处理");
+
+  state.manifest = { collections: [{ id: "linear-algebra-selected-20261018", name: "线代严选题", question_count: 2, unmatched: 0 }] };
+  state.chapterScope = "core";
+  renderer.scopeQuestionIdsCache.set("core", new Set(["1", "2"]));
+  const original = { id: 30, name: "原有章节", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  const legacyCollection = { id: 7000000, name: "线代严选题", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  assert.deepEqual(
+    Array.from(renderer.visibleCatalogNodes([original, legacyCollection], 1), node => node.name),
+    ["线代严选题"],
+    "只靠 manifest 名字识别出的历史题单同样参与去重",
+  );
+
+  state.manifest = null;
+  assert.equal(renderer.isCollectionNode({ id: 7000000, name: "线代严选题" }), false, "没有 manifest 题单摘要时按普通目录处理");
+});
+
+// 章节选择弹窗与主目录用同一套可见性；保存的深层路径被当前范围隐藏时截断到最近可见节点。
+test("章节选择弹窗沿用同一可见性并截断失效路径", () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  const renderer = ui.UIRenderer;
+  state.chapterScope = "core";
+  renderer.scopeQuestionIdsCache.set("core", new Set(["1", "2", "9"]));
+  const original = { id: 20, name: "原有章节", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  const partial = { id: 21, name: "部分覆盖", question_count: 1, questions: [{ id: 9 }], children: [] };
+  const collection = { id: 7000000, name: "线代严选题", collection_id: "list", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  const linear = { id: 10, name: "线性代数", question_count: 3, questions: [{ id: 1 }, { id: 2 }, { id: 9 }], children: [original, partial, collection] };
+  const probability = { id: 11, name: "概率统计", question_count: 0, questions: [], children: [] };
+  state.categories = { categories: [linear, probability] };
+  state.chapterPickerPath = ["10", "20"];
+  const host = new FakeElement("div");
+  ui.__elements.set("chapter-picker", host);
+  ui.requestAnimationFrame = () => {};
+
+  renderer.renderChapterPicker();
+  assert.deepEqual(Array.from(state.chapterPickerPath), ["10"], "被隐藏的层级把弹窗路径截断到最近可见节点");
+  assert.match(host.innerHTML, /线代严选题/);
+  assert.match(host.innerHTML, /部分覆盖/);
+  assert.doesNotMatch(host.innerHTML, /原有章节/, "被题单完整覆盖的原章节不出现在弹窗");
+  assert.match(host.innerHTML, /概率统计/, "科目根在弹窗里同样保持可见");
+});
+
+// 可见性要沿整条祖先路径校验：父级被题单覆盖隐藏时，子级自己还有题也不能停在子级，
+// 否则主目录会显示一条进不去的深层路径，和 popup 的截断结果不一致。
+test("隐藏父级下的子节点回退到科目根，主目录与弹窗一致", () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  const renderer = ui.UIRenderer;
+  state.chapterScope = "core";
+  renderer.scopeQuestionIdsCache.set("core", new Set(["1", "2", "9"]));
+  const leaf = { id: 31, name: "深层小节", question_count: 1, questions: [{ id: 9 }], children: [] };
+  const chapter = { id: 30, name: "被覆盖章节", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [leaf] };
+  const collection = { id: 7000000, name: "线代严选题", collection_id: "list", question_count: 2, questions: [{ id: 1 }, { id: 2 }], children: [] };
+  const subject = { id: 10, name: "线性代数", question_count: 3, questions: [{ id: 1 }, { id: 2 }, { id: 9 }], children: [chapter, collection] };
+  state.categories = { categories: [subject] };
+
+  assert.deepEqual(Array.from(renderer.visibleCatalogNodes(subject.children, 1), node => node.name), ["线代严选题"], "被题单完整覆盖的父章节隐藏");
+  assert.equal(renderer.visibleDirectoryNode(subject, leaf).id, 10, "父级不可见时子级退到科目根，不停在自身");
+  assert.equal(renderer.visibleDirectoryNode(subject, { id: "gone", name: "已下线章节" }), subject, "不在目录树里的节点回到科目根");
+
+  const columns = renderer.catalogColumns(subject, leaf);
+  assert.equal(columns.length, 2, "回退后只为可见祖先构造列");
+  assert.equal(columns[0].selectedId, "10");
+  assert.equal(columns[1].selectedId, null);
+  assert.deepEqual(Array.from(columns[1].items, item => item.node.name), ["线代严选题"]);
+
+  state.chapterPickerPath = ["10", "30", "31"];
+  const host = new FakeElement("div");
+  ui.__elements.set("chapter-picker", host);
+  ui.requestAnimationFrame = () => {};
+  renderer.renderChapterPicker();
+  assert.deepEqual(Array.from(state.chapterPickerPath), ["10"], "弹窗把失效的深层路径截断到同一可见祖先");
+  assert.doesNotMatch(host.innerHTML, /深层小节|被覆盖章节/);
+});
+
+// 当前范围零题的选中节点退到上一级可见节点，主目录与弹窗给出同一位置。
+test("严选零题的选中节点回退到上一可见级，主目录与弹窗一致", () => {
+  const ui = loadNewUI();
+  const state = ui.AppState;
+  const renderer = ui.UIRenderer;
+  state.chapterScope = "core";
+  renderer.scopeQuestionIdsCache.set("core", new Set(["1"]));
+  const leaf = { id: 41, name: "零题小节", question_count: 0, questions: [], children: [] };
+  const branch = { id: 40, name: "有题章节", question_count: 1, questions: [{ id: 1 }], children: [leaf] };
+  const subject = { id: 10, name: "高等数学", question_count: 1, questions: [{ id: 1 }], children: [branch] };
+  state.categories = { categories: [subject] };
+
+  assert.equal(renderer.visibleDirectoryNode(subject, leaf).id, 40, "零题叶子回退到有题的父级");
+  const columns = renderer.catalogColumns(subject, leaf);
+  assert.equal(columns.length, 3, "回退到父级后继续展开父级的下级列");
+  assert.equal(columns[0].selectedId, "10");
+  assert.equal(columns[1].selectedId, "40");
+  assert.deepEqual(Array.from(columns[2].items, item => item.node.name), [], "隐藏的零题叶子不出现在下级列");
+
+  state.chapterPickerPath = ["10", "40", "41"];
+  const host = new FakeElement("div");
+  ui.__elements.set("chapter-picker", host);
+  ui.requestAnimationFrame = () => {};
+  renderer.renderChapterPicker();
+  assert.deepEqual(Array.from(state.chapterPickerPath), ["10", "40"], "弹窗保留到可见父级为止的路径");
+  assert.doesNotMatch(host.innerHTML, /零题小节/);
 });

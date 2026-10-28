@@ -805,20 +805,36 @@ async function serveStatic(requestPath, res, bankId = null) {
     catch {
       if (!bankRoot || !staticPath.startsWith("/assets/")) throw new Error("resource missing");
       const assetName = path.basename(staticPath);
-      if (!/^[0-9a-f]{64}\.png$/.test(assetName)) throw new Error("resource missing");
-      file = path.join(WEB_ROOT, "data", "assets", assetName);
-      try { await fs.access(file); }
-      catch {
-        const versionsRoot = path.join(store.dataDir, "question-bank", "versions");
-        const versions = await fs.readdir(versionsRoot).catch(() => []);
-        let found = false;
-        for (const version of versions) {
-          if (!/^[0-9a-f-]{36}$/.test(version)) continue;
-          const candidate = path.join(versionsRoot, version, "assets", assetName);
-          try { await fs.access(candidate); file = candidate; found = true; break; } catch {}
-        }
-        if (!found) throw new Error("resource missing");
+      // 题图白名单只放开既有的四种图片格式；jpg/jpeg 同族互认，避免命中了别名却仍 404。
+      if (!/^[0-9a-f]{64}\.(png|jpe?g|webp|gif)$/.test(assetName)) throw new Error("resource missing");
+      const candidates = /\.jpe?g$/.test(assetName)
+        ? [assetName, assetName.replace(/\.jpe?g$/, extension => extension === ".jpg" ? ".jpeg" : ".jpg")]
+        : [assetName];
+      // 查找范围不变：当前题库版本 → bundled → 既有 versions。
+      const assetDirs = [path.join(bankRoot, "assets"), path.join(WEB_ROOT, "data", "assets")];
+      const versionsRoot = path.join(store.dataDir, "question-bank", "versions");
+      const versions = await fs.readdir(versionsRoot).catch(error => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      for (const version of versions) {
+        if (/^[0-9a-f-]{36}$/.test(version)) assetDirs.push(path.join(versionsRoot, version, "assets"));
       }
+      file = null;
+      for (const dir of assetDirs) {
+        for (const candidate of candidates) {
+          const next = path.join(dir, candidate);
+          try {
+            await fs.access(next);
+            file = next;
+            break;
+          } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+          }
+        }
+        if (file) break;
+      }
+      if (!file) throw new Error("resource missing");
     }
     const ext = path.extname(file).toLowerCase();
     const isHtml = ext === ".html";

@@ -14,11 +14,27 @@ test("desktop question bank updates atomically and keeps the last good version o
   const question = { id: 1, category_id: 223, category_ids: [223], content_hash: "first", is_core: false,
     document: { question_type: "essay", stem_md: "题目", answer: { reference_answer_md: "答案" } } };
   let online = true;
+  // 题单三端点：空题单的合法 data shape。
+  const collection = pathname => {
+    if (pathname === "/api/question-lists/linear-algebra-selected-20261018") {
+      return { code: 0, data: { id: "linear-algebra-selected-20261018", name: "线代严选题", revision: 1,
+        item_count: 0, is_official: true, status: "published", definition_kind: "explicit" } };
+    }
+    if (pathname === "/api/question-lists/linear-algebra-selected-20261018/directory") {
+      return { code: 0, data: { total: 0, roots: [{ id: "1", label: "线性代数", category_id: 1,
+        question_count: 0, children: [] }] } };
+    }
+    if (pathname === "/api/question-lists/linear-algebra-selected-20261018/items") {
+      return { code: 0, data: { items: [], total: 0, page: 1, per_page: 200 } };
+    }
+    return null;
+  };
   globalThis.fetch = async url => {
     if (!online) throw new Error("offline");
     const target = new URL(url);
-    const value = target.pathname === "/api/categories" ? categories :
-      { code: 0, data: { items: [question], total: 1, total_pages: 1, page: 1 } };
+    const collectionBody = collection(target.pathname);
+    const value = collectionBody || (target.pathname === "/api/categories" ? categories :
+      { code: 0, data: { items: [question], total: 1, total_pages: 1, page: 1 } });
     return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
   };
   try {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { parsePaperNumber, sortExamPaperQuestions, syncOfficialQuestionBank, synthesizeExamCategoryTree, synthesizedCategoryId } from "../local-server/official-question-bank.mjs";
+import { parsePaperNumber, rebuildOfficialCategoryPaths, sortExamPaperQuestions, syncOfficialQuestionBank, synthesizeExamCategoryTree, synthesizedCategoryId } from "../local-server/official-question-bank.mjs";
 
 // 官网原始记录的字段是 category_full_path / category_name；category_path 只是本地
 // normalizeQuestion 的产物，原始快照里没有，这里不构造它。
@@ -152,6 +152,152 @@ test("synthesized IDs and official leaf IDs conflicting with the current tree fa
     questions: [] }), /不合法或重复/);
 });
 
+// --- 隐藏分类恢复：官网 /api/categories 只返回部分子树，题目记录仍带完整路径 ---
+const HIDDEN_ROOTS = [
+  { id: 223, name: "高等数学", children: [{ id: 224, name: "极限", children: [] }] },
+  { id: 1, name: "线性代数", children: [] },
+  { id: 601, name: "概率统计", children: [] },
+];
+
+test("隐藏的模拟卷树按记录证据恢复到 2500 根，中间节点用稳定哈希 ID", () => {
+  const questions = [
+    question(1, "模拟卷 / 张八 / 27张八卷一", 2501),
+    question(2, "模拟哥专区 / 李六 / 27李六第五套", 2502),
+  ];
+  const result = rebuildOfficialCategoryPaths({ questions, categories: HIDDEN_ROOTS, total: 2 });
+  // 「模拟卷」与「模拟哥专区」是同一个根的两个写法，不能各造一个节点。
+  const roots = result.categories.filter(category => category.id === 2500);
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].name, "模拟哥专区");
+  assert.deepEqual(roots[0].children.map(category => [category.name, category.id]), [
+    ["张八", synthesizedCategoryId("模拟哥专区 / 张八")],
+    ["李六", synthesizedCategoryId("模拟哥专区 / 李六")],
+  ]);
+  assert.deepEqual(roots[0].children[0].children.map(category => [category.name, category.id]),
+    [["27张八卷一", 2501]]);
+  assert.deepEqual(roots[0].children[1].children.map(category => [category.name, category.id]),
+    [["27李六第五套", 2502]]);
+  // 题目本体与既有学科根都不被改动。
+  assert.deepEqual(result.questions, questions);
+  assert.deepEqual(result.categories.filter(category => category.id !== 2500), HIDDEN_ROOTS);
+});
+
+test("官网已给出 2500 根时保留其显示名，但中间节点仍用规范前缀的哈希 ID", () => {
+  const categories = [...HIDDEN_ROOTS, { id: 2500, name: "模拟卷", children: [] }];
+  const result = rebuildOfficialCategoryPaths({ categories, total: 1,
+    questions: [question(1, "模拟卷 / 张八 / 27张八卷一", 2501)] });
+  const root = result.categories.find(category => category.id === 2500);
+  assert.equal(root.name, "模拟卷");
+  assert.deepEqual(root.children.map(category => [category.name, category.id]),
+    [["张八", synthesizedCategoryId("模拟哥专区 / 张八")]]);
+});
+
+test("模拟卷中间节点的稳定 ID 与 2500 根是否存在、以及别名写法无关", () => {
+  const expected = synthesizedCategoryId("模拟哥专区 / 张八");
+  const cases = [
+    [HIDDEN_ROOTS, "模拟卷 / 张八 / 27张八卷一", "模拟哥专区"],
+    [HIDDEN_ROOTS, "模拟哥专区 / 张八 / 27张八卷一", "模拟哥专区"],
+    [[...HIDDEN_ROOTS, { id: 2500, name: "模拟卷", children: [] }], "模拟卷 / 张八 / 27张八卷一", "模拟卷"],
+    [[...HIDDEN_ROOTS, { id: 2500, name: "模拟哥专区", children: [] }], "模拟哥专区 / 张八 / 27张八卷一", "模拟哥专区"],
+  ];
+  for (const [categories, path, displayName] of cases) {
+    const result = rebuildOfficialCategoryPaths({ categories, total: 1, questions: [question(1, path, 2501)] });
+    const root = result.categories.find(category => category.id === 2500);
+    assert.equal(root.name, displayName, `${path}：根显示名应沿用既有节点或数据层显示名`);
+    const child = root.children.find(category => category.name === "张八");
+    assert.equal(child.id, expected, `${path}：中间节点 ID 必须与规范前缀的哈希一致`);
+    assert.deepEqual(child.children.map(category => [category.name, category.id]), [["27张八卷一", 2501]]);
+  }
+});
+
+test("学科根下缺失的隐藏子路径按记录证据补齐，叶子保留官方 ID", () => {
+  const questions = [
+    question(1, "高等数学 / 极限 / 求函数表达式", 331),
+    question(2, "高等数学 / 中值定理 / 罗尔定理", 341),
+  ];
+  const result = rebuildOfficialCategoryPaths({ questions, categories: HIDDEN_ROOTS, total: 2 });
+  const math = result.categories.find(category => category.id === 223);
+  // 已存在的中间节点被复用，不重复造。
+  const limit = math.children.find(category => category.name === "极限");
+  assert.equal(limit.id, 224);
+  assert.deepEqual(limit.children.map(category => [category.name, category.id]), [["求函数表达式", 331]]);
+  // 缺失的中间节点按稳定哈希补出，叶子仍是官方 ID。
+  const meanValue = math.children.find(category => category.name === "中值定理");
+  assert.equal(meanValue.id, synthesizedCategoryId("高等数学 / 中值定理"));
+  assert.deepEqual(meanValue.children.map(category => [category.name, category.id]), [["罗尔定理", 341]]);
+  assert.deepEqual(result.questions, questions);
+});
+
+test("没有路径证据时可选根 2500 仍缺席，未知根不造节点", () => {
+  const questions = [
+    { id: 1, category_id: null, category_ids: [], stem: "题干1", answer: "答案1" },
+    question(2, "高等数学-核心 / 计算", 900),
+    question(3, "", 999),
+  ];
+  const result = rebuildOfficialCategoryPaths({ questions, categories: HIDDEN_ROOTS, total: 3 });
+  assert.deepEqual(result.categories, HIDDEN_ROOTS);
+  assert.deepEqual(result.questions, questions);
+});
+
+test("恢复时不改动已合成的真题树，也不复活旧的 836", () => {
+  const questions = [
+    question(1, "历年真题 / 数一 / 2019", 3510),
+    question(2, "模拟卷 / 张八 / 27张八卷一", 2501),
+  ];
+  const synthesized = synthesizeExamCategoryTree({ questions, categories: HIDDEN_ROOTS, total: 2 });
+  const result = rebuildOfficialCategoryPaths(synthesized);
+  assert.equal(result.examRootId, synthesized.examRootId);
+  assert.equal(result.categories.some(category => category.id === 836), false);
+  const examRoot = result.categories.find(category => category.name === "历年真题");
+  assert.equal(examRoot.id, synthesizedCategoryId("历年真题"));
+  assert.deepEqual(examRoot.children.map(category => [category.name, category.id]),
+    [["数一", synthesizedCategoryId("历年真题 / 数一")]]);
+  assert.deepEqual(examRoot.children[0].children.map(category => [category.name, category.id]),
+    [["2019", 3510]]);
+  // 除新增的模拟卷根外，分类树与合成结果完全一致。
+  assert.deepEqual(result.categories.filter(category => category.id !== 2500), synthesized.categories);
+  assert.deepEqual(result.questions, questions);
+});
+
+test("同一路径对应多个官方叶子 ID、同一 ID 对应多个路径、路径与既有节点不一致都显式失败", () => {
+  assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, total: 2, questions: [
+    question(1, "模拟卷 / 张八 / 27张八卷一", 2501),
+    question(2, "模拟卷 / 张八 / 27张八卷一", 2502)] }), /对应多个官方叶子分类 ID/);
+  assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, total: 2, questions: [
+    question(1, "模拟卷 / 张八 / 27张八卷一", 2501),
+    question(2, "模拟卷 / 李六 / 27李六第五套", 2501)] }), /对应多个路径/);
+  // 树上已有同名叶子但 ID 不同：不猜，直接失败。
+  assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, total: 1,
+    questions: [question(1, "高等数学 / 极限", 341)] }), /与题目记录不一致/);
+  // 多条已知根候选路径无法判定归属：不按多数投票。
+  assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, total: 1,
+    questions: [question(1, "高等数学 / 极限、线性代数 / 矩阵", 900)] }), /多条已知根分类路径/);
+});
+
+test("路径/ID 冲突与记录次序无关，正反两种顺序都显式失败", () => {
+  const samePath = [["模拟卷 / 张八 / 27张八卷一", 2501], ["模拟卷 / 张八 / 27张八卷一", 2502]];
+  const sameId = [["模拟卷 / 张八 / 27张八卷一", 2501], ["模拟卷 / 李六 / 27李六第五套", 2501]];
+  for (const [[pathA, idA], [pathB, idB]] of [samePath, sameId]) {
+    const forward = [question(1, pathA, idA), question(2, pathB, idB)];
+    const backward = [question(2, pathB, idB), question(1, pathA, idA)];
+    const pattern = idA === idB ? /对应多个路径/ : /对应多个官方叶子分类 ID/;
+    for (const questions of [forward, backward]) {
+      assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, questions,
+        total: questions.length }), pattern);
+    }
+  }
+});
+
+test("官方叶子 ID 恰好等于另一条恢复路径的合成中间 ID 时显式失败，不误复用也不漏建", () => {
+  const collidingId = synthesizedCategoryId("模拟哥专区 / 甲");
+  const intermediate = question(1, "模拟卷 / 甲 / 27张八卷一", 2501);
+  const collidingLeaf = question(2, "模拟卷 / 乙 / 27李六第五套", collidingId);
+  for (const questions of [[intermediate, collidingLeaf], [collidingLeaf, intermediate]]) {
+    assert.throws(() => rebuildOfficialCategoryPaths({ categories: HIDDEN_ROOTS, questions,
+      total: 2 }), /冲突/);
+  }
+});
+
 // --- 卷内题号解析：source 是多段自由文本，必须按叶子科目与年份取段 ---
 test("卷内题号从单科括号里取数字，全角半角括号都认", () => {
   assert.deepEqual(parsePaperNumber("2009数一（5）", { subject: "数一", year: "2009" }), { number: 5 });
@@ -287,12 +433,29 @@ function officialQuestion(id, categoryPath, categoryId, extra = {}) {
       answer: { reference_answer_md: `答案${id}` }, explanation_md: "" }, ...extra };
 }
 
+// 空题单：三个 collection 端点返回合法但为空的 data，供不关心题单的既有用例复用。
+const EMPTY_COLLECTION_LIST = { code: 0, data: { id: "linear-algebra-selected-20261018",
+  name: "线代严选题", revision: 1, item_count: 0, is_official: true, status: "published",
+  definition_kind: "explicit" } };
+const EMPTY_COLLECTION_DIRECTORY = { code: 0, data: { total: 0, roots: [{ id: "1", label: "线性代数",
+  category_id: 1, question_count: 0, children: [] }] } };
+const EMPTY_COLLECTION_ITEMS = { code: 0, data: { items: [], total: 0, page: 1, per_page: 200 } };
+
+function collectionResponse(pathname) {
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018") return EMPTY_COLLECTION_LIST;
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018/directory") return EMPTY_COLLECTION_DIRECTORY;
+  if (pathname === "/api/question-lists/linear-algebra-selected-20261018/items") return EMPTY_COLLECTION_ITEMS;
+  return null;
+}
+
 function stubOfficialFetch(questions, categories) {
   const original = globalThis.fetch;
   globalThis.fetch = async url => {
     const target = new URL(url);
     const json = value => new Response(JSON.stringify(value), { status: 200,
       headers: { "Content-Type": "application/json" } });
+    const collection = collectionResponse(target.pathname);
+    if (collection) return json(collection);
     if (target.pathname === "/api/categories") return json(categories);
     const page = Number(target.searchParams.get("page") || 1);
     const perPage = Number(target.searchParams.get("per_page") || 200);

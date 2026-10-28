@@ -87,6 +87,33 @@ test('v2 补写解析的数据契约', () => {
   assert.ok(!isBlank(image.stemText) && !isBlank(image.explanationText), '图片题缺转写字段');
 });
 
+// 已下架题的解析不删除，改为移到 retired_explanations 留档：活动区只保留当前在库题目。
+test('v2 下架题解析归档：active 与 retired 不重叠，retired 已离库', () => {
+  const active = payload.explanations;
+  const retired = payload.retired_explanations;
+  assert.equal(payload.count, Object.keys(active).length, 'count 必须等于活动解析数');
+  assert.equal(payload.retired_count, 6, 'retired_count 应为 6');
+  assert.equal(Object.keys(retired).length, payload.retired_count);
+
+  // 活动区全部在库；留档区全部离库；两边不重叠。
+  for (const id of Object.keys(active)) assert.ok(Object.hasOwn(idIndex, id), `活动解析 #${id} 不在题库里`);
+  for (const id of Object.keys(retired)) {
+    assert.ok(!Object.hasOwn(idIndex, id), `留档解析 #${id} 仍在题库里，应留在活动区`);
+    assert.ok(!Object.hasOwn(active, id), `#${id} 同时出现在活动区与留档区`);
+  }
+
+  // 留档条目必须仍是完整解析结构，不能只剩题号或空壳。
+  for (const [id, entry] of Object.entries(retired)) {
+    assert.ok(Array.isArray(entry.steps) && entry.steps.length >= 2, `留档 #${id} 步骤缺失`);
+    assert.ok(!isBlank(entry.answerFinal), `留档 #${id} 缺 answerFinal`);
+    assert.match(String(entry.difficulty || ''), /^(基础|中等|较难)$/, `留档 #${id} difficulty 非法`);
+    for (const step of entry.steps) {
+      assert.ok(!isBlank(step.content), `留档 #${id} 步骤内容缺失`);
+      assert.ok(!isBlank(step.why), `留档 #${id} 步骤缺 why`);
+    }
+  }
+});
+
 test('v2 解析按需加载、只在展开答案时进页面', () => {
   const html = read('web/index.html');
   const app = read('web/app-new.js');

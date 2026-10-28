@@ -103,6 +103,12 @@ test("classify：单来源样本", () => {
     ["LYF三套卷", ["mock"], ["mock_lyf"]],
     ["Euclid 八月模考", ["mock"], ["mock_euclid"]],
     ["郭伟模考", ["mock"], ["mock_other"]],
+    ["27线代王六套一", ["mock"], ["mock_other"]],
+    ["26押题王六套卷五", ["mock"], ["mock_other"]],
+    ["25余五数二卷二16", ["mock"], ["mock_other"]],
+    ["25哈基米德三套数二卷三22", ["mock"], ["mock_other"]],
+    ["2024合工大超越十套卷·数二·第1套·第1题", ["mock"], ["mock_other"]],
+    ["25超越数二卷八10", ["mock"], ["mock_other"]],
     ["某大学 2020 年数学一", ["exam"], ["exam_school"]],
     ["竞赛题 第一题", ["contest"], ["contest"]],
     ["25 版 强化 33", ["other"], ["other"]],
@@ -133,6 +139,9 @@ test("规则顺序：先判先赢的几个坑位", () => {
   // Euclid / 郭伟模考 先于 mock_other
   assert.deepEqual(toArr(tax.classify("Euclid 八月模考").books), ["mock_euclid"]);
   assert.deepEqual(toArr(tax.classify("郭伟模考").books), ["mock_other"]);
+  // 「超越135」是更早的 other 专用规则，不被新增的「超越」套卷规则抢走
+  assert.deepEqual(toArr(tax.classify("超越135").systems), ["other"]);
+  assert.deepEqual(toArr(tax.classify("超越135").books), ["other"]);
   // 880 残片（第五章数二 A 类）也归 880
   assert.deepEqual(toArr(tax.classify("第五章数二 A 类").books), ["b880"]);
   // 姜晓千的讲义标记先于张宇

@@ -65,6 +65,8 @@ export async function createQuestionBankUpdater({ dataDir, bundledDataDir, enabl
       try {
         const result = await syncOfficialQuestionBank({
           targetDir: stage, overlayDir: bundledDataDir,
+          // 旧分类只从「当前活动版本」读回：本地 overlay 仍用 bundled，避免把上一版本当 overlay。
+          previousDataDir: dataRoot(),
           fallbackAssetsDir: path.join(bundledDataDir, "assets"), signal: abort.signal,
           currentFingerprint: current?.bundledHash === bundledHash ? current.fingerprint : null,
         });
@@ -74,6 +76,7 @@ export async function createQuestionBankUpdater({ dataDir, bundledDataDir, enabl
         const pointer = { id, fingerprint: result.fingerprint, bundledHash,
           sourceTotal: result.sourceTotal, total: result.total, missingAssets: result.missingAssets,
           native_solution_stats: result.native_solution_stats,
+          skippedPending: result.skippedPending, preservedPreviousCategories: result.preservedPreviousCategories,
           updatedAt: new Date().toISOString() };
         const tempPointer = `${pointerFile}.tmp-${id}`;
         await fs.writeFile(tempPointer, `${JSON.stringify(pointer)}\n`);

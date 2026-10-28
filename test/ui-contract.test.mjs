@@ -118,7 +118,7 @@ test("Service Worker 不预缓存首屏之外的大型索引和字体", () => {
   assert.match(sw, /"\.\/styles-new\.css\?v=127"/);
   assert.match(sw, /"\.\/ui-version\.js\?v=109"/);
   assert.match(sw, /"\.\/ui-version\.js\?v=109"/);
-  assert.match(sw, /"\.\/source-taxonomy\.js\?v=1"/);
+  assert.match(sw, /"\.\/source-taxonomy\.js\?v=2"/);
   const newScript = newHtml.match(/src="(\.\/app-new\.js\?v=\d+)"/)?.[1];
   assert.ok(newScript); assert.ok(sw.includes(JSON.stringify(newScript)));
   assert.match(sw, /"\.\/assets\/math-mark\.svg"/);
@@ -160,7 +160,7 @@ test("新版入口承载新版前端并与旧版共享版本选择", () => {
   assert.match(newHtml, /styles-new\.css\?v=127/);
   assert.match(newHtml, /ui-version\.js\?v=109/);
   assert.match(newHtml, /ui-bootstrap\.js\?v=1/);
-  assert.match(newHtml, /source-taxonomy\.js\?v=1/);
+  assert.match(newHtml, /source-taxonomy\.js\?v=2/);
   assert.match(newHtml, /app-new\.js\?v=\d+/);
   assert.match(uiBootstrap, /DaguanVersions\.selected\(localStorage\)/);
   assert.match(newHtml, /dlg-preview-access/);
@@ -259,7 +259,7 @@ test("界面版本：旧大观承载完整旧版前端", () => {
   const legacyApp = fs.readFileSync(new URL("../web/app-legacy.js", import.meta.url), "utf8");
   assert.match(legacyHtml, /<title>大观园 · 本地刷题<\/title>/);
   assert.match(legacyHtml, /legacy\.css\?v=\d+/);
-  assert.match(legacyHtml, /source-taxonomy\.js\?v=1/);
+  assert.match(legacyHtml, /source-taxonomy\.js\?v=2/);
   assert.match(legacyHtml, /app-legacy\.js\?v=\d+/);
   assert.match(legacyHtml, /<header class="topbar learning-shell__topbar">[\s\S]*id="btn-switch-new"/);
   assert.doesNotMatch(legacyHtml, /legacy-version-toggle|practice-version-toggle|data-version-choice/);
